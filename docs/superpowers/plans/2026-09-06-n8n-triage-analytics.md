@@ -111,7 +111,7 @@ Expected: FAIL — cannot find module `../src/lib/labels.js`
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "node --test tests/",
+    "test": "node --test tests/*.test.js",
     "backfill": "node src/backfill.js"
   }
 }
