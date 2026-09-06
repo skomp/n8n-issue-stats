@@ -11,7 +11,7 @@ import {
   issuesFromPages,
   applyPages,
   buildReportPayload,
-  planIndexWrite,
+  planWrite,
   buildIngestWorkflow,
   buildReportWorkflow,
   renderWorkflowFile,
@@ -650,64 +650,109 @@ test('"Upsert store" still reaches state.json across the branch split', () => {
   }), /read back 13 record\(s\) but state\.json records 5464/);
 });
 
-// --- index.html: the write that needs a sha, and cannot always have one ------
+// --- Every write is an upsert: send the sha only when the read returned one --
 
-test('planIndexWrite omits the sha on the first run, when the read 404s', () => {
-  const body = planIndexWrite(
+test('planWrite omits the sha on a first-ever write, when the read 404s', () => {
+  const body = planWrite(
     { statusCode: 404, body: { message: 'Not Found' } },
-    { message: 'publish', content: 'YmFzZTY0' },
+    { message: 'publish', content: 'YmFzZTY0', source: 'Read index.html sha' },
   );
   assert.deepEqual(body, { message: 'publish', content: 'YmFzZTY0' });
   assert.ok(!('sha' in body), 'a create must not send a sha');
 });
 
-test('planIndexWrite includes the sha the read returned, verbatim', () => {
-  const body = planIndexWrite(
+test('planWrite includes the sha the read returned, verbatim', () => {
+  const body = planWrite(
     { statusCode: 200, body: { sha: 'd0f4e1c2b3a49586', path: 'index.html' } },
-    { message: 'publish', content: 'YmFzZTY0' },
+    { message: 'publish', content: 'YmFzZTY0', source: 'Read index.html sha' },
   );
   assert.equal(body.sha, 'd0f4e1c2b3a49586');
   assert.deepEqual(Object.keys(body).sort(), ['content', 'message', 'sha']);
 });
 
-test('planIndexWrite refuses a status it cannot interpret rather than guessing', () => {
-  // A 500 or a 403 says NOTHING about whether index.html exists. Treating it
+test('planWrite refuses a status it cannot interpret rather than guessing', () => {
+  // A 500 or a 403 says NOTHING about whether the file exists. Treating it
   // as "no sha" turns a transient upstream failure into a 422 on the write,
   // where the real cause is invisible.
   assert.throws(
-    () => planIndexWrite({ statusCode: 500, body: {} }, { message: 'm', content: 'c' }),
+    () => planWrite({ statusCode: 500, body: { sha: 'stale111' } }, { message: 'm', content: 'c', source: 'Read report sha' }),
     /HTTP 500[\s\S]*Only 404 means/,
   );
   assert.throws(
-    () => planIndexWrite({ statusCode: 403, body: {} }, { message: 'm', content: 'c' }),
+    () => planWrite({ statusCode: 403, body: {} }, { message: 'm', content: 'c', source: 'Read report sha' }),
     /HTTP 403/,
   );
 });
 
-test('planIndexWrite refuses a 200 that carried no blob sha', () => {
+test('planWrite names the read it was given, so three identical reads stay distinguishable', () => {
+  // An unattributed "HTTP 500" from a chain of three identical-looking reads
+  // is not actionable.
   assert.throws(
-    () => planIndexWrite({ statusCode: 200, body: { path: 'index.html' } }, { message: 'm', content: 'c' }),
+    () => planWrite({ statusCode: 500, body: { sha: 'stale111' } }, { message: 'm', content: 'c', source: 'Read report HTML sha' }),
+    /^Error: Read report HTML sha: HTTP 500/,
+  );
+  assert.throws(
+    () => planWrite(undefined, { message: 'm', content: 'c', source: 'Read report sha' }),
+    /^Error: Read report sha: the response carried no statusCode/,
+  );
+});
+
+test('planWrite refuses a 200 that carried no blob sha', () => {
+  assert.throws(
+    () => planWrite({ statusCode: 200, body: { path: 'index.html' } }, { message: 'm', content: 'c', source: 'Read index.html sha' }),
+    /no blob sha/,
+  );
+  // An empty string is not a sha either — GitHub rejects it with the same 422
+  // a missing sha earns, and `typeof '' === 'string'` would wave it through.
+  assert.throws(
+    () => planWrite({ statusCode: 200, body: { sha: '' } }, { message: 'm', content: 'c', source: 'Read index.html sha' }),
     /no blob sha/,
   );
 });
 
-test('planIndexWrite refuses a response with no status code at all', () => {
+test('planWrite refuses a response with no status code at all', () => {
   // That is what a node without fullResponse returns, and it would make a
   // missing file indistinguishable from an existing one.
   assert.throws(
-    () => planIndexWrite({ sha: 'abc' }, { message: 'm', content: 'c' }),
+    () => planWrite({ sha: 'abc' }, { message: 'm', content: 'c', source: 'Read index.html sha' }),
     /no statusCode[\s\S]*fullResponse/,
   );
-  assert.throws(() => planIndexWrite(undefined, { message: 'm', content: 'c' }), /no statusCode/);
+  assert.throws(
+    () => planWrite(undefined, { message: 'm', content: 'c', source: 'Read index.html sha' }),
+    /no statusCode/,
+  );
 });
 
-test('"Read index.html sha" tolerates the first-run 404 and keeps the status code', () => {
-  const node = nodeNamed(buildReportWorkflow(), 'Read index.html sha');
-  assert.equal(node.parameters.method, 'GET');
-  assert.equal(node.parameters.url, 'https://api.github.com/repos/skomp/n8n-reports/contents/index.html');
-  const response = node.parameters.options.response.response;
-  assert.equal(response.neverError, true, 'a 404 on run one must not fail the workflow');
-  assert.equal(response.fullResponse, true, 'without the status code a 404 is indistinguishable from a 200');
+test('ALL THREE sha reads tolerate a 404 and keep the status code', () => {
+  // skomp/n8n-test#2: index.html was the only path that read its sha first.
+  // The two dated files did not, so a same-day re-run 422'd on both and left
+  // them at their first-run content while index.html advanced.
+  const wf = buildReportWorkflow();
+  for (const name of ['Read report sha', 'Read report HTML sha', 'Read index.html sha']) {
+    const node = nodeNamed(wf, name);
+    assert.equal(node.parameters.method, 'GET', `${name} must be a GET`);
+    const response = node.parameters.options?.response?.response;
+    assert.equal(response?.neverError, true, `${name}: a 404 on a first-ever write must not fail the run`);
+    assert.equal(response?.fullResponse, true, `${name}: without the status code a 404 looks like a 200`);
+  }
+});
+
+test('each sha read points at the path its own write will PUT', () => {
+  // A read aimed at the wrong path returns the WRONG FILE's blob sha, and
+  // GitHub answers the PUT with 409/422 — or, worse, the read 404s and the
+  // write then tries to create a file that already exists.
+  const wf = buildReportWorkflow();
+  const base = 'https://api.github.com/repos/skomp/n8n-reports/contents/';
+
+  const pairs = [
+    ['Read report sha', 'Write report', `={{ "${base}" + $('Rollup and render').first().json.path }}`],
+    ['Read report HTML sha', 'Write report HTML', `={{ "${base}" + $('Rollup and render').first().json.htmlPath }}`],
+    ['Read index.html sha', 'Write index.html', `${base}index.html`],
+  ];
+  for (const [readNode, writeNode, url] of pairs) {
+    assert.equal(nodeNamed(wf, readNode).parameters.url, url, `${readNode} reads the wrong path`);
+    assert.equal(nodeNamed(wf, writeNode).parameters.url, url, `${writeNode} writes a path its read never checked`);
+  }
 });
 
 // --- The report workflow publishes three files ------------------------------
@@ -741,55 +786,160 @@ test('both renderings are anchored to the SAME report timestamp', () => {
   assert.match(late.htmlContent, /<title>n8n triage report — 2026-09-06<\/title>/);
 });
 
+test('every sha read happens before every write', () => {
+  // A read that runs after its own write learns nothing. All three reads have
+  // to be upstream of the first PUT.
+  const { connections } = buildReportWorkflow();
+  const order = ['Weekly'];
+  while (connections[order.at(-1)]) order.push(connections[order.at(-1)].main[0][0].node);
+
+  const at = name => {
+    const i = order.indexOf(name);
+    assert.notEqual(i, -1, `${name} is not on the report workflow's chain`);
+    return i;
+  };
+  const firstWrite = Math.min(at('Write report'), at('Write report HTML'), at('Write index.html'));
+  for (const read of ['Read report sha', 'Read report HTML sha', 'Read index.html sha']) {
+    assert.ok(at(read) < firstWrite, `${read} must run before any write, not after`);
+  }
+  assert.ok(at('Plan writes') < firstWrite, 'the write bodies must be planned before the first PUT');
+});
+
 test('the report workflow writes the two dated files before index.html', () => {
   // index.html is the pointer at the archive. If a dated write fails, the
   // pointer must NOT already be advanced to a report that is not there.
   const { connections } = buildReportWorkflow();
-  assert.deepEqual(connections['Plan index write'].main[0].map(c => c.node), ['Write report']);
+  assert.deepEqual(connections['Plan writes'].main[0].map(c => c.node), ['Write report']);
   assert.deepEqual(connections['Write report'].main[0].map(c => c.node), ['Write report HTML']);
   assert.deepEqual(connections['Write report HTML'].main[0].map(c => c.node), ['Write index.html']);
   assert.equal(connections['Write index.html'], undefined, 'index.html must be the last write');
 });
 
-test('only index.html sends a blob sha; the dated paths never do', () => {
+test('all three writes take their body from "Plan writes", each its own', () => {
+  // A write that builds its own body inline is a write that decides about the
+  // sha without having read one — the original defect.
   const wf = buildReportWorkflow();
-  for (const name of ['Write report', 'Write report HTML']) {
-    const body = nodeNamed(wf, name).parameters.jsonBody;
-    assert.doesNotMatch(body, /sha/, `${name} must not send a sha — its path is unique per run`);
+  const bodies = {
+    'Write report': 'reportBody',
+    'Write report HTML': 'reportHtmlBody',
+    'Write index.html': 'indexBody',
+  };
+  for (const [name, field] of Object.entries(bodies)) {
+    assert.equal(
+      nodeNamed(wf, name).parameters.jsonBody,
+      `={{ $('Plan writes').first().json.${field} }}`,
+      `${name} must PUT the body "Plan writes" built for it`,
+    );
+    assert.equal(nodeNamed(wf, name).parameters.method, 'PUT');
   }
-  // index.html's body is built by the Code node, which decides about the sha.
-  assert.match(nodeNamed(wf, 'Write index.html').parameters.jsonBody, /Plan index write/);
 });
 
-test('the generated "Plan index write" node creates on run one and updates on run two', () => {
-  const jsCode = nodeNamed(buildReportWorkflow(), 'Plan index write').parameters.jsCode;
-  const rendered = {
-    path: 'reports/2026-09-06-triage.md',
-    content: b64('# md'),
-    htmlPath: 'reports/2026-09-06-triage.html',
-    htmlContent: b64('<!doctype html>'),
-    indexPath: 'index.html',
+// The "Plan writes" node under test, driven with per-file sha reads. Returns
+// the three decoded PUT bodies plus the diagnostic `created` map.
+function runPlanWrites({ report, reportHtml, index }, rendered) {
+  const jsCode = nodeNamed(buildReportWorkflow(), 'Plan writes').parameters.jsCode;
+  const out = runCodeNode(jsCode, {
+    nodes: {
+      'Rollup and render': rendered,
+      'Read report sha': report,
+      'Read report HTML sha': reportHtml,
+      'Read index.html sha': index,
+    },
+  });
+  assert.equal(out.length, 1, '"Plan writes" must emit exactly one item');
+  return {
+    report: JSON.parse(out[0].json.reportBody),
+    reportHtml: JSON.parse(out[0].json.reportHtmlBody),
+    index: JSON.parse(out[0].json.indexBody),
+    created: out[0].json.created,
   };
-  const run = response => {
-    const out = runCodeNode(jsCode, {
-      nodes: { 'Rollup and render': rendered, 'Read index.html sha': response },
-    });
-    assert.equal(out.length, 1);
-    return { body: JSON.parse(out[0].json.body), created: out[0].json.created };
-  };
+}
 
-  const first = run({ statusCode: 404, body: { message: 'Not Found' } });
-  assert.equal(first.created, true);
-  assert.ok(!('sha' in first.body), 'the first run must create, without a sha');
+const RENDERED = {
+  path: 'reports/2026-09-06-triage.md',
+  content: b64('# md'),
+  htmlPath: 'reports/2026-09-06-triage.html',
+  htmlContent: b64('<!doctype html>'),
+  indexPath: 'index.html',
+};
 
-  const later = run({ statusCode: 200, body: { sha: '9a8b7c6d5e4f' } });
-  assert.equal(later.created, false);
-  assert.equal(later.body.sha, '9a8b7c6d5e4f');
+const found = sha => ({ statusCode: 200, body: { sha } });
+const missing = { statusCode: 404, body: { message: 'Not Found' } };
 
-  // index.html is a COPY of the dated HTML, never a second rendering: the same
-  // base64 must appear in both writes.
-  assert.equal(first.body.content, rendered.htmlContent);
-  assert.equal(later.body.content, rendered.htmlContent);
+test('a first-ever run creates all three files, none of them with a sha', () => {
+  const plan = runPlanWrites({ report: missing, reportHtml: missing, index: missing }, RENDERED);
+
+  for (const name of ['report', 'reportHtml', 'index']) {
+    assert.ok(!('sha' in plan[name]), `${name}: a create must not send a sha`);
+  }
+  assert.deepEqual(plan.created, { report: true, reportHtml: true, index: true });
+});
+
+test('a SAME-DAY RE-RUN overwrites all three files, each with its OWN sha', () => {
+  // This is skomp/n8n-test#2. Before the fix the two dated writes sent no sha
+  // whatever the read said, so GitHub answered 422 and both files kept their
+  // first-run content while index.html was replaced.
+  //
+  // Three DIFFERENT shas, deliberately: a blob sha is per file. Reusing one
+  // across the three writes is a 409/422 at run time, and a test that fed the
+  // same sha to all three could not see it.
+  const plan = runPlanWrites(
+    { report: found('aaa111'), reportHtml: found('bbb222'), index: found('ccc333') },
+    RENDERED,
+  );
+
+  assert.equal(plan.report.sha, 'aaa111', 'the markdown write must carry the markdown blob sha');
+  assert.equal(plan.reportHtml.sha, 'bbb222', 'the dated HTML write must carry its own blob sha');
+  assert.equal(plan.index.sha, 'ccc333', 'index.html must carry the index blob sha');
+  assert.deepEqual(plan.created, { report: false, reportHtml: false, index: false });
+
+  // Value check, not shape: each write must carry the CONTENT for its path.
+  assert.equal(plan.report.content, RENDERED.content);
+  assert.equal(plan.report.message, 'report: reports/2026-09-06-triage.md');
+  assert.equal(plan.reportHtml.content, RENDERED.htmlContent);
+  assert.equal(plan.reportHtml.message, 'report: reports/2026-09-06-triage.html');
+  // index.html is a COPY of the dated HTML, never a second rendering.
+  assert.equal(plan.index.content, RENDERED.htmlContent);
+});
+
+test('a re-run after a partial failure creates what is missing and overwrites what is there', () => {
+  // The state the controller actually hit: the markdown landed, then the run
+  // failed. The re-run must overwrite the markdown and create the other two.
+  const plan = runPlanWrites(
+    { report: found('aaa111'), reportHtml: missing, index: missing },
+    RENDERED,
+  );
+  assert.equal(plan.report.sha, 'aaa111');
+  assert.ok(!('sha' in plan.reportHtml), 'a file that does not exist must be created, not updated');
+  assert.ok(!('sha' in plan.index));
+  assert.deepEqual(plan.created, { report: false, reportHtml: true, index: true });
+});
+
+test('"Plan writes" fails the run on a sha read it cannot interpret, naming that read', () => {
+  // A 500 on any one of the three reads says nothing about whether that file
+  // exists. Guessing turns it into an opaque 422 on the PUT.
+  const cases = [
+    ['report', 'Read report sha'],
+    ['reportHtml', 'Read report HTML sha'],
+    ['index', 'Read index.html sha'],
+  ];
+  for (const [key, nodeName] of cases) {
+    const reads = { report: missing, reportHtml: missing, index: missing, [key]: { statusCode: 500, body: { sha: 'stale111' } } };
+    assert.throws(
+      () => runPlanWrites(reads, RENDERED),
+      new RegExp(`${nodeName}: HTTP 500`),
+      `a 500 from ${nodeName} must fail the run, not be treated as "file absent"`,
+    );
+  }
+});
+
+test('"Plan writes" fails the run when a sha read lost its status code', () => {
+  // What a read without fullResponse returns. Treating it as absent would 422
+  // every same-day re-run again.
+  assert.throws(
+    () => runPlanWrites({ report: { sha: 'aaa111' }, reportHtml: missing, index: missing }, RENDERED),
+    /Read report sha: the response carried no statusCode/,
+  );
 });
 
 test('the generated "Rollup and render" node emits all three files as ONE item', () => {

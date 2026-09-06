@@ -384,31 +384,48 @@ export function buildReportPayload(storeText, generatedAtISO) {
 }
 
 // ---------------------------------------------------------------------------
-// index.html: the one write that needs a blob sha, and cannot always have one
+// Every write is an idempotent upsert: read the sha first, send it only if it
+// came back
 // ---------------------------------------------------------------------------
 //
-// The two dated files are written to a path that is unique per run, so GitHub's
-// Contents API creates them and no sha is involved. index.html is OVERWRITTEN
-// every run, and the API refuses a PUT over an existing file without the
-// current blob sha (422). So the sha has to be read first — except on the very
-// first run, when index.html does not exist yet and the read is a 404.
+// GitHub's Contents API refuses a PUT over an EXISTING file without that file's
+// current blob sha, and answers 422. It equally refuses a sha for a file that
+// does not exist yet. So the sha has to be read first, and the read is a 404
+// whenever the file is new.
 //
-// "Read index.html sha" therefore runs with neverError so the 404 does not fail
-// the run, and fullResponse so the status code survives to here. This function
-// is the whole decision, and it is deliberately strict about which statuses it
-// will interpret:
+// All THREE files this workflow writes need that treatment, not just
+// index.html:
+//
+//   index.html                       — overwritten every run by design.
+//   reports/YYYY-MM-DD-triage.md     — the date makes the path unique per DAY,
+//   reports/YYYY-MM-DD-triage.html     not per RUN. A second run on the same
+//                                      day hits an existing file and 422s.
+//
+// That asymmetry was the defect (skomp/n8n-test#2): a same-day re-run updated
+// index.html — which supplied a sha and so succeeded — while both dated files
+// 422'd and kept their first-run content. The published page and the archived
+// report for that date then disagreed.
+//
+// Each "Read <file> sha" node therefore runs with neverError so a 404 does not
+// fail the run, and fullResponse so the status code survives to here. This
+// function is the whole decision, and it is deliberately strict about which
+// statuses it will interpret:
 //
 //   404          -> the file does not exist. Create it, send NO sha.
 //   2xx + sha    -> the file exists. Overwrite it, send the sha.
-//   anything else-> throw. A 500 or a 403 says nothing about whether
-//                   index.html exists, and guessing "no sha" there turns a
-//                   transient upstream failure into a confusing 422 on the
-//                   write. Fail on the read instead, where the cause is legible.
-export function planIndexWrite(response, { message, content }) {
+//   anything else-> throw. A 500 or a 403 says nothing about whether the file
+//                   exists, and guessing "no sha" there turns a transient
+//                   upstream failure into a confusing 422 on the write. Fail on
+//                   the read instead, where the cause is legible.
+//
+// `source` names the read node the response came from, so a failure says WHICH
+// of the three reads went wrong. With three identical-looking reads in one
+// chain, an unattributed "HTTP 500" is not actionable.
+export function planWrite(response, { message, content, source }) {
   const status = response?.statusCode;
   if (typeof status !== 'number') {
     throw new Error(
-      'Read index.html sha: the response carried no statusCode. The node must set both ' +
+      `${source}: the response carried no statusCode. The node must set both ` +
       'fullResponse and neverError, or a missing file cannot be told apart from an existing one.'
     );
   }
@@ -416,7 +433,7 @@ export function planIndexWrite(response, { message, content }) {
 
   if (status < 200 || status >= 300) {
     throw new Error(
-      `Read index.html sha: HTTP ${status}. Only 404 means "index.html does not exist yet"; ` +
+      `${source}: HTTP ${status}. Only 404 means "the file does not exist yet"; ` +
       'refusing to guess, because a PUT with no sha over an existing file fails with 422.'
     );
   }
@@ -424,7 +441,7 @@ export function planIndexWrite(response, { message, content }) {
   const sha = response?.body?.sha;
   if (typeof sha !== 'string' || sha === '') {
     throw new Error(
-      `Read index.html sha: HTTP ${status} but the response body carried no blob sha. ` +
+      `${source}: HTTP ${status} but the response body carried no blob sha. ` +
       'Writing without one would fail with 422.'
     );
   }
@@ -512,6 +529,31 @@ function rawReadNode({ name, position, path }) {
       'Accept: application/vnd.github.raw is mandatory. With the default JSON media type the ' +
       'Contents API returns HTTP 200 with an EMPTY content field for files over 1 MB, and ' +
       'issues.ndjson is 2.86 MB. Measured 2026-09-06.',
+  });
+}
+
+// A GET whose only purpose is to learn whether a file exists and, if it does,
+// what its current blob sha is. Every write in the report workflow is preceded
+// by one of these — see planWrite() for why.
+//
+// The two response options are not optional decoration and are set HERE, in one
+// place, so all three reads cannot drift apart:
+//
+//   neverError:   a 404 means "this file does not exist yet", which is a normal
+//                 state and must not stop the run. Without it, the very first
+//                 write of any of the three files fails the workflow.
+//   fullResponse: without the status code there is no way to tell "does not
+//                 exist yet" from "exists but the body was not what we
+//                 expected", and the two need opposite handling. planWrite()
+//                 throws rather than guess when it is missing.
+function shaReadNode({ name, position, url, notes }) {
+  return httpRequestNode({
+    name,
+    position,
+    method: 'GET',
+    url,
+    options: { response: { response: { neverError: true, fullResponse: true } } },
+    notes,
   });
 }
 
@@ -697,9 +739,10 @@ const generatedAt = new Date().toISOString();
 // rather than to wall-clock time read somewhere deeper.
 const payload = buildReportPayload(storeText, generatedAt);
 
-// Three files per run, from ONE render. The two dated paths are unique per
-// run and are created outright; index.html is the same HTML bytes republished
-// at the site root, and is the only one that needs a blob sha.
+// Three files per run, from ONE render. index.html is the same HTML bytes
+// republished at the site root. All three are written as idempotent upserts —
+// see planWrite() and "Plan writes" — so a second run on the same day replaces
+// the whole set instead of leaving the dated files behind.
 return [{
   json: {
     path: payload.path,
@@ -714,28 +757,60 @@ return [{
   return [lib, helpers, driver].join('\n\n');
 }
 
-function buildPlanIndexWriteCode() {
-  const helpers = planIndexWrite.toString();
+function buildPlanWritesCode() {
+  const helpers = planWrite.toString();
 
   const driver = `
 // --- n8n driver ---------------------------------------------------------
-// ONE item in, ONE item out. Pure logic: it decides whether the index.html
-// PUT carries a blob sha, from the status code of the read before it.
+// ONE item in, ONE item out. Pure logic: for each of the three files it
+// decides whether the PUT carries a blob sha, from the status code of that
+// file's own sha read.
 //
-// index.html does not exist on the first run, so that read is a 404 and must
-// not fail the workflow -- "Read index.html sha" sets neverError for exactly
-// that, and fullResponse so the status code reaches this node at all.
+// None of the three exists on a first-ever write, so those reads are 404s and
+// must not fail the workflow -- each "Read ... sha" node sets neverError for
+// exactly that, and fullResponse so the status code reaches this node at all.
+//
+// The dated paths contain the DATE, not the run, so a second run on the same
+// day finds them present and must overwrite them with their current sha. That
+// is the whole of skomp/n8n-test#2: index.html used to be the only path that
+// did this, so a same-day re-run advanced the published page while both dated
+// files stayed at their first-run content.
 const payload = $('Rollup and render').first().json;
-const response = $('Read index.html sha').first().json;
 
-const body = planIndexWrite(response, {
+const report = planWrite($('Read report sha').first().json, {
+  message: 'report: ' + payload.path,
+  content: payload.content,
+  source: 'Read report sha',
+});
+
+const reportHtml = planWrite($('Read report HTML sha').first().json, {
+  message: 'report: ' + payload.htmlPath,
+  content: payload.htmlContent,
+  source: 'Read report HTML sha',
+});
+
+const index = planWrite($('Read index.html sha').first().json, {
   message: 'report: publish ' + payload.htmlPath + ' as ' + payload.indexPath,
   // The SAME base64 the dated .html write uses. index.html is a copy of the
   // latest report, never a second rendering of it.
   content: payload.htmlContent,
+  source: 'Read index.html sha',
 });
 
-return [{ json: { body: JSON.stringify(body), created: body.sha === undefined } }];
+return [{
+  json: {
+    reportBody: JSON.stringify(report),
+    reportHtmlBody: JSON.stringify(reportHtml),
+    indexBody: JSON.stringify(index),
+    // Diagnostic only, so the execution log says which of the three were
+    // created and which were overwritten.
+    created: {
+      report: report.sha === undefined,
+      reportHtml: reportHtml.sha === undefined,
+      index: index.sha === undefined,
+    },
+  },
+}];
 `.trim();
 
   return [helpers, driver].join('\n\n');
@@ -926,66 +1001,80 @@ export function buildReportWorkflow() {
     },
     rawReadNode({ name: 'Read issues.ndjson', position: [220, 0], path: 'issues.ndjson' }),
     codeNode({ name: 'Rollup and render', position: [440, 0], jsCode: buildReportCode() }),
-    httpRequestNode({
-      name: 'Read index.html sha',
+    shaReadNode({
+      name: 'Read report sha',
       position: [660, 0],
-      method: 'GET',
+      url: `={{ "${GITHUB_API}/repos/${REPORTS_REPO}/contents/" + $('Rollup and render').first().json.path }}`,
+      notes:
+        'The dated markdown report. 404 the first time this date is written; 200 with the current ' +
+        'blob sha on a SAME-DAY RE-RUN, because the path carries the date and not the run. ' +
+        '"Plan writes" turns that into a create or an overwrite.',
+    }),
+    shaReadNode({
+      name: 'Read report HTML sha',
+      position: [880, 0],
+      url: `={{ "${GITHUB_API}/repos/${REPORTS_REPO}/contents/" + $('Rollup and render').first().json.htmlPath }}`,
+      notes:
+        'The dated HTML twin, at the same dated path as the markdown and with the same same-day ' +
+        're-run behaviour. Its sha is its own — a blob sha is per FILE, never shared with the ' +
+        'markdown beside it.',
+    }),
+    shaReadNode({
+      name: 'Read index.html sha',
+      position: [1100, 0],
       url: `${GITHUB_API}/repos/${REPORTS_REPO}/contents/${INDEX_PATH}`,
-      options: {
-        response: {
-          response: {
-            // neverError: on the FIRST run index.html does not exist and this
-            // is a 404. That is a normal state, not a failure, so it must not
-            // stop the run. fullResponse: without the status code there is no
-            // way to tell "does not exist yet" from "exists but the body was
-            // not what we expected", and the two need opposite handling.
-            neverError: true,
-            fullResponse: true,
-          },
-        },
-      },
       notes:
         'Returns 404 on the first run, before index.html exists — neverError keeps that from failing ' +
-        'the workflow, and fullResponse preserves the status code so "Plan index write" can tell a ' +
+        'the workflow, and fullResponse preserves the status code so "Plan writes" can tell a ' +
         'missing file from a present one. The blob sha changes on every write, so it is never cached.',
     }),
-    codeNode({ name: 'Plan index write', position: [880, 0], jsCode: buildPlanIndexWriteCode() }),
+    codeNode({ name: 'Plan writes', position: [1320, 0], jsCode: buildPlanWritesCode() }),
     httpRequestNode({
       name: 'Write report',
-      position: [1100, 0],
+      position: [1540, 0],
       method: 'PUT',
       url: `={{ "${GITHUB_API}/repos/${REPORTS_REPO}/contents/" + $('Rollup and render').first().json.path }}`,
-      jsonBody: '={{ JSON.stringify({ "message": "report: " + $(\'Rollup and render\').first().json.path, "content": $(\'Rollup and render\').first().json.content }) }}',
+      jsonBody: '={{ $(\'Plan writes\').first().json.reportBody }}',
       notes:
-        'No sha is sent: the path carries the report date, so each weekly run creates a new file. ' +
-        'A second run on the same day fails with 422 rather than overwriting — intended.',
+        'An idempotent upsert. "Plan writes" includes the sha only when "Read report sha" returned ' +
+        'one, so the first write of a date creates the file and a same-day re-run overwrites it. ' +
+        'Before skomp/n8n-test#2 this sent no sha at all and a same-day re-run failed with 422.',
     }),
     httpRequestNode({
       name: 'Write report HTML',
-      position: [1320, 0],
+      position: [1760, 0],
       method: 'PUT',
       url: `={{ "${GITHUB_API}/repos/${REPORTS_REPO}/contents/" + $('Rollup and render').first().json.htmlPath }}`,
-      jsonBody: '={{ JSON.stringify({ "message": "report: " + $(\'Rollup and render\').first().json.htmlPath, "content": $(\'Rollup and render\').first().json.htmlContent }) }}',
+      jsonBody: '={{ $(\'Plan writes\').first().json.reportHtmlBody }}',
       notes:
-        'The styled HTML twin of the markdown report, at the same dated path. Like the markdown it ' +
-        'needs no sha, because the date makes the path unique.',
+        'The styled HTML twin of the markdown report, at the same dated path, written the same way: ' +
+        'an upsert carrying the sha from "Read report HTML sha" only when that read returned one.',
     }),
     httpRequestNode({
       name: 'Write index.html',
-      position: [1540, 0],
+      position: [1980, 0],
       method: 'PUT',
       url: `${GITHUB_API}/repos/${REPORTS_REPO}/contents/${INDEX_PATH}`,
-      jsonBody: '={{ $(\'Plan index write\').first().json.body }}',
+      jsonBody: '={{ $(\'Plan writes\').first().json.indexBody }}',
       notes:
-        'The ONLY write that needs a blob sha, because it overwrites the same path every week. ' +
-        '"Plan index write" includes the sha only when the read returned one, so the first run ' +
-        'creates the file and later runs update it. Runs LAST, deliberately: if a dated write fails, ' +
-        'index.html is not left pointing at a report that is missing from the archive.',
+        'Overwrites the same path every week, so from run two onward it always carries a sha. ' +
+        'Runs LAST, deliberately: if a dated write fails, index.html is not left pointing at a ' +
+        'report that is missing from the archive.',
     }),
   ];
 
-  const chain = ['Weekly', 'Read issues.ndjson', 'Rollup and render', 'Read index.html sha',
-    'Plan index write', 'Write report', 'Write report HTML', 'Write index.html'];
+  // Every sha read happens BEFORE any write. The reads only need "Rollup and
+  // render" for the dated paths, so they could run concurrently, but three
+  // more parallel branches would need a second Merge barrier to earn a few
+  // hundred milliseconds against a weekly schedule. Straight-line order is
+  // what a reader can check.
+  //
+  // The writes stay dated-first, index.html LAST: index.html is the pointer at
+  // the archive, and it must not be advanced to a report the archive does not
+  // have.
+  const chain = ['Weekly', 'Read issues.ndjson', 'Rollup and render',
+    'Read report sha', 'Read report HTML sha', 'Read index.html sha',
+    'Plan writes', 'Write report', 'Write report HTML', 'Write index.html'];
   const connections = {};
   for (let i = 0; i < chain.length - 1; i += 1) {
     connections[chain[i]] = { main: [[{ node: chain[i + 1], type: 'main', index: 0 }]] };

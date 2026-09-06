@@ -169,10 +169,27 @@ therefore reads all four of its inputs by node name.
 connection's `index` is **0-based**. `output: "empty"` uses neither, which is
 one fewer off-by-one to get wrong.
 
-**`index.html` is the only write that needs a blob sha (2026-09-06).** The two
-dated paths are unique per run, so the Contents API creates them outright.
-`index.html` is overwritten weekly and returns 404 on the first run, so the sha
-read runs with `neverError` and `fullResponse`, and `planIndexWrite()` sends the
-sha only when the read returned one. Any status other than 2xx or 404 throws
-rather than guessing: a PUT with no sha over an existing file fails with an
-opaque 422, which is a much worse place to discover a transient 500.
+**All three report writes are idempotent upserts (2026-09-06, revised).** Each
+of the three files is preceded by its own `Read ... sha` node running with
+`neverError` and `fullResponse`, and `planWrite()` sends the sha only when that
+read returned one. Any status other than 2xx or 404 throws rather than guessing:
+a PUT with no sha over an existing file fails with an opaque 422, which is a
+much worse place to discover a transient 500.
+
+**Correction.** This entry previously read "`index.html` is the only write that
+needs a blob sha", on the reasoning that the dated paths are unique per run.
+They are not — they are unique per **day**. A same-day re-run therefore 422'd on
+both dated files while `index.html`, which did supply a sha, succeeded, and the
+published page disagreed with the archived report for that date. Reported as
+skomp/n8n-test#2 and hit during deployment on 2026-09-06, when the controller
+had to delete `reports/2026-09-06-triage.md` by hand before re-running.
+
+**Overwrite with a conditional sha, not delete-then-create (2026-09-06).** The
+issue described the fix as "delete before recreate". A conditional-sha PUT
+reaches the same end state in **one** request per file, with no window in which
+the report is absent from the archive, and no half-applied state if a second
+call fails. An explicit DELETE followed by a PUT doubles the request count and
+adds both of those failure modes for no gain.
+
+The writes stay ordered dated-first, `index.html` **last**: it is the pointer at
+the archive and must not be advanced to a report the archive does not have.

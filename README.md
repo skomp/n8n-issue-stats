@@ -125,22 +125,51 @@ stays strictly ordered: the store is written before the watermark, so a failed
 store write leaves the next run re-fetching the same window instead of skipping
 it.
 
-### The report workflow publishes three files
+### The report workflow publishes three files, and a re-run is safe
+
+```
+Weekly ─► Read issues.ndjson ─► Rollup and render
+       ─► Read report sha ─► Read report HTML sha ─► Read index.html sha
+       ─► Plan writes ─► Write report ─► Write report HTML ─► Write index.html
+```
 
 | Path | Content | Blob sha |
 |---|---|---|
-| `reports/YYYY-MM-DD-triage.md` | markdown | not needed — the dated path is unique |
-| `reports/YYYY-MM-DD-triage.html` | the same numbers, as a styled page | not needed — same reason |
-| `index.html` | a byte-for-byte copy of the latest HTML | **required from run two onward** |
+| `reports/YYYY-MM-DD-triage.md` | markdown | sent when the file already exists |
+| `reports/YYYY-MM-DD-triage.html` | the same numbers, as a styled page | sent when the file already exists |
+| `index.html` | a byte-for-byte copy of the latest HTML | sent when the file already exists |
 
-`index.html` is overwritten every week, and GitHub's Contents API refuses a PUT
-over an existing file without the current blob sha — but returns **404 on the
-first run**, before the file exists. `Read index.html sha` therefore sets
-`neverError` (so the 404 does not fail the run) and `fullResponse` (so the
-status code survives), and `planIndexWrite()` includes the sha only when the
-read actually returned one. It refuses to guess on any other status: a 500 says
-nothing about whether `index.html` exists, and treating it as "absent" would
-turn a transient failure into an opaque 422 on the write.
+**All three writes are idempotent upserts.** A second report run on the same day
+replaces all three files and leaves them consistent with each other. Re-running
+the workflow is safe, and needs no manual delete first.
+
+GitHub's Contents API refuses a PUT over an **existing** file without that
+file's current blob sha, and answers 422. It equally refuses a sha for a file
+that does not exist yet. So each write is preceded by its own `Read ... sha`
+node, and `planWrite()` puts the sha in the PUT body **only when that read
+actually returned one**:
+
+- **404** — the file does not exist. Create it, send no sha.
+- **2xx with a sha** — the file exists. Overwrite it, send that sha.
+- **any other status** — throw, and name the read that failed. A 500 says
+  nothing about whether the file exists, and treating it as "absent" would turn
+  a transient failure into an opaque 422 on the write.
+
+Every `Read ... sha` node sets `neverError` (so a 404 does not fail the run) and
+`fullResponse` (so the status code survives to `Plan writes`). A blob sha is per
+file, so each write carries the sha of its own path and never a neighbour's.
+
+The dated paths carry the **date**, not the run. Before
+[#2](https://github.com/skomp/n8n-test/issues/2) only `index.html` read its sha
+first, so a same-day re-run replaced the published page while both dated files
+failed with 422 and kept their first-run content — the Pages site and the
+archive then disagreed. The fix overwrites with a conditional sha rather than
+deleting and re-creating: one request per file, and no window in which the
+report is missing.
+
+`index.html` is still written **last**, deliberately. It is the pointer at the
+archive, so if a dated write fails the pointer is not already advanced to a
+report the archive does not have.
 
 The HTML is **self-contained** — one inline `<style>` block, no external
 stylesheet, script or web font — so it renders identically from GitHub Pages and

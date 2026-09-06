@@ -16,9 +16,10 @@ export function reportHtmlPath(date) {
   return `reports/${date.toISOString().slice(0, 10)}-triage.html`;
 }
 
-// The published copy of the latest HTML report. Overwritten every run, unlike
-// the dated paths above — which is why its write needs a blob sha and theirs
-// do not. See planIndexWrite() in build/build-workflows.js.
+// The published copy of the latest HTML report. Overwritten every run; the
+// dated paths above are overwritten by any RE-RUN on the same date, because
+// they carry the date and not the run. All three are therefore written as
+// idempotent upserts — see planWrite() in build/build-workflows.js.
 export const INDEX_PATH = 'index.html';
 
 // The archive link is ABSOLUTE on purpose. The identical bytes are published
