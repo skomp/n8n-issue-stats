@@ -88,9 +88,14 @@ item is fine; 5,464 items are not.
 
 | Repo | Holds |
 |---|---|
-| `skomp/n8n-issue-stats` (this) | Library, CLIs, workflow generator, deploy script |
-| `skomp/n8n-data` | `issues.ndjson` (5,464 records, 2.9 MB) and `state.json` (sync watermark) |
-| `skomp/n8n-reports` | `reports/YYYY-MM-DD-triage.{md,html}` and `index.html` (GitHub Pages) |
+| [`skomp/n8n-issue-stats`](https://github.com/skomp/n8n-issue-stats) (this) | Library, CLIs, workflow generator, deploy script |
+| [`skomp/n8n-data`](https://github.com/skomp/n8n-data) | `issues.ndjson` (5,464 records, 2.9 MB) and `state.json` (sync watermark) |
+| [`skomp/n8n-reports`](https://github.com/skomp/n8n-reports) | `reports/YYYY-MM-DD-triage.{md,html}` and `index.html` |
+
+The reports repository is published with GitHub Pages:
+
+- **Latest report** — <https://skomp.github.io/n8n-reports/>
+- **Every report, by date** — <https://github.com/skomp/n8n-reports/tree/main/reports>
 
 ```
                     ┌─ local, once ────────────────────────────┐
