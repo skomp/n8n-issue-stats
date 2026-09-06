@@ -6,6 +6,13 @@ const table = (header, rows) =>
    `|${header.map(() => '---').join('|')}|`,
    ...rows.map(r => `| ${r.join(' | ')} |`)].join('\n');
 
+// DESCENDING by count, then by key for a stable tie-break. The direction is
+// load-bearing, not cosmetic: the Component, Rejection-reasons and Triage-funnel
+// tables are the report's ranking, so an ascending sort would make it lead with
+// `closed:info` (19 issues on the real store) and bury
+// `closed:incomplete-template` (1,150) at the bottom of the page — every number
+// still correct, the message reversed. Guarded by the ROW ORDER tests in
+// tests/report.test.js, which assert relative order in both renderers.
 const sortedEntries = obj => Object.entries(obj).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 
 export function reportPath(date) {

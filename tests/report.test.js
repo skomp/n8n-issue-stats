@@ -24,14 +24,17 @@ const md = renderReport(r, { generatedAt: '2026-09-06T10:00:00Z' });
 // printing coverage as 0%, dropping `unclassified`, and swapping the fix
 // lead-time row for the close row — all passed a suite built on substrings,
 // because the static caveat prose happens to contain the words being searched.
-const section = heading => {
-  const body = md.split(`\n## ${heading}\n`)[1];
+const sectionIn = (text, heading) => {
+  const body = text.split(`\n## ${heading}\n`)[1];
   assert.ok(body, `missing section: ${heading}`);
   return body.split('\n## ')[0];
 };
 
-const rows = heading => section(heading).split('\n')
+const rowsIn = (text, heading) => sectionIn(text, heading).split('\n')
   .filter(l => l.startsWith('|') && !l.startsWith('|---') && !/^\| (Segment|Reason|Component|State|Measure|Month) /.test(l));
+
+const section = heading => sectionIn(md, heading);
+const rows = heading => rowsIn(md, heading);
 
 test('path is dated and stable', () => {
   assert.equal(reportPath(new Date('2026-09-06T10:00:00Z')), 'reports/2026-09-06-triage.md');
@@ -220,11 +223,13 @@ const styleBlock = html.split('<style>')[1].split('</style>')[0];
 // or a property name that happens to appear in the stylesheet.
 const htmlBody = html.split('</style>')[1];
 
-const htmlSection = heading => {
-  const body = html.split(`<h2>${heading}</h2>`)[1];
+const htmlSectionIn = (text, heading) => {
+  const body = text.split(`<h2>${heading}</h2>`)[1];
   assert.ok(body, `missing HTML section: ${heading}`);
   return body.split('<h2>')[0];
 };
+
+const htmlSection = heading => htmlSectionIn(html, heading);
 
 test('the HTML path is dated, and sits beside the markdown', () => {
   assert.equal(reportHtmlPath(new Date('2026-09-06T10:00:00Z')), 'reports/2026-09-06-triage.html');
@@ -474,6 +479,103 @@ test('the HTML carries every section heading the markdown does', () => {
                          'Triage funnel', 'Lead times', 'Monthly intake', 'Coverage and caveats']) {
     assert.ok(html.includes(`<h2>${heading}</h2>`), `missing HTML section: ${heading}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// ROW ORDER
+// ---------------------------------------------------------------------------
+//
+// VERIFIED MUTATION: flipping `b[1] - a[1]` to `a[1] - b[1]` in sortedEntries()
+// -- descending to ascending -- left 188/188 green. Every row assertion above is
+// an unanchored per-row regex, and nothing asserted which row comes FIRST. On
+// the real store that inversion makes the report lead with `closed:info`
+// (19 issues) and bury `closed:incomplete-template` (1,150) at the bottom of the
+// page, which reverses the report's entire message while every number in it
+// stays correct.
+//
+// The shared fixture cannot catch it in the Rejection-reasons table: both
+// reasons there count 1, and a tie is resolved by localeCompare in BOTH sort
+// directions, so the rendered order is identical either way. ORDERED below is a
+// purpose-built population that gives all three tables DISTINCT counts.
+//
+//   rejectionReasons  closed:incomplete-template 3, closed:duplicate 1
+//   components        nodes 4, ai 1
+//   triageStates      triage:pending 8, triage:stalled 1
+const orderedIssue = (number, ...labelNames) => ({
+  number,
+  createdAt: '2026-01-15T00:00:00Z',
+  updatedAt: '2026-01-16T00:00:00Z',
+  labels: { nodes: labelNames.map(name => ({ name })) },
+});
+
+const ORDERED = [
+  orderedIssue(1, 'closed:incomplete-template', 'triage:pending'),
+  orderedIssue(2, 'closed:incomplete-template', 'triage:pending'),
+  orderedIssue(3, 'closed:incomplete-template', 'triage:pending'),
+  orderedIssue(4, 'closed:duplicate', 'triage:stalled'),
+  orderedIssue(5, 'team:nodes', 'triage:pending'),
+  orderedIssue(6, 'team:nodes', 'triage:pending'),
+  orderedIssue(7, 'team:nodes', 'triage:pending'),
+  orderedIssue(8, 'team:nodes', 'triage:pending'),
+  orderedIssue(9, 'team:ai', 'triage:pending'),
+];
+const orderedRollup = rollup(ORDERED, WINDOW);
+const orderedMd = renderReport(orderedRollup, { generatedAt: '2026-09-06T10:00:00Z' });
+const orderedHtml = renderHtml(orderedRollup, { generatedAt: '2026-09-06T10:00:00Z' });
+
+// `| label | count | ... |` -> [label, count], in rendered order.
+const mdPairs = (text, heading) => rowsIn(text, heading)
+  .map(l => l.split('|').map(c => c.trim()))
+  .map(cells => [cells[1], Number(cells[2])]);
+
+// `<tr><td>label</td><td class="num">count</td>...` -> [label, count].
+const htmlPairs = (text, heading) =>
+  [...htmlSectionIn(text, heading).matchAll(/<tr><td>(.*?)<\/td><td class="num">(\d+)<\/td>/g)]
+    .map(m => [m[1], Number(m[2])]);
+
+// One assertion, applied to both renderers: rows descend by count, so the
+// biggest number is the first thing a reader sees and the smallest is last.
+const assertDescending = (pairs, what) => {
+  assert.ok(pairs.length >= 2, `${what}: need at least two rows to have an order`);
+  const counts = pairs.map(([, n]) => n);
+  assert.ok(Math.max(...counts) > Math.min(...counts),
+    `${what}: every row has the same count, so this cannot detect a sort flip`);
+  for (let i = 1; i < counts.length; i += 1) {
+    assert.ok(counts[i - 1] >= counts[i],
+      `${what}: row ${i} (${pairs[i][0]} = ${counts[i]}) outranks row ${i - 1} (${pairs[i - 1][0]} = ${counts[i - 1]})`);
+  }
+  assert.equal(counts[0], Math.max(...counts), `${what}: the largest count is not the first row`);
+  assert.equal(counts.at(-1), Math.min(...counts), `${what}: the smallest count is not the last row`);
+};
+
+test('markdown table rows descend by count, largest first', () => {
+  // The shared fixture: unclassified 4, packages/nodes-base 3, then two 1s.
+  assertDescending(mdPairs(md, 'Component'), 'md Component');
+  // triage:pending 6, then two 2s.
+  assertDescending(mdPairs(md, 'Triage funnel'), 'md Triage funnel');
+  // ORDERED, because the shared fixture ties both reasons at 1.
+  assertDescending(mdPairs(orderedMd, 'Rejection reasons'), 'md Rejection reasons');
+  assertDescending(mdPairs(orderedMd, 'Component'), 'md Component (ORDERED)');
+  assertDescending(mdPairs(orderedMd, 'Triage funnel'), 'md Triage funnel (ORDERED)');
+
+  // Named explicitly, so a reader can see which way round "first" is.
+  assert.deepEqual(mdPairs(md, 'Component')[0], ['unclassified', 4]);
+  assert.deepEqual(mdPairs(md, 'Triage funnel')[0], ['triage:pending', 6]);
+  assert.deepEqual(mdPairs(orderedMd, 'Rejection reasons')[0], ['closed:incomplete-template', 3]);
+  assert.deepEqual(mdPairs(orderedMd, 'Rejection reasons').at(-1), ['closed:duplicate', 1]);
+});
+
+test('HTML table rows descend by count, largest first', () => {
+  assertDescending(htmlPairs(html, 'Component'), 'html Component');
+  assertDescending(htmlPairs(html, 'Triage funnel'), 'html Triage funnel');
+  assertDescending(htmlPairs(orderedHtml, 'Rejection reasons'), 'html Rejection reasons');
+  assertDescending(htmlPairs(orderedHtml, 'Component'), 'html Component (ORDERED)');
+  assertDescending(htmlPairs(orderedHtml, 'Triage funnel'), 'html Triage funnel (ORDERED)');
+
+  assert.deepEqual(htmlPairs(html, 'Component')[0], ['unclassified', 4]);
+  assert.deepEqual(htmlPairs(html, 'Triage funnel')[0], ['triage:pending', 6]);
+  assert.deepEqual(htmlPairs(orderedHtml, 'Rejection reasons')[0], ['closed:incomplete-template', 3]);
+  assert.deepEqual(htmlPairs(orderedHtml, 'Rejection reasons').at(-1), ['closed:duplicate', 1]);
 });
 
 test('HTML rendering is deterministic for a fixed input', () => {
