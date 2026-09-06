@@ -1,177 +1,193 @@
 # n8n triage analytics
 
-This project ingests triaged GitHub issues from `n8n-io/n8n` and publishes a
-weekly markdown report on issue triage outcomes: a headline stating the
-accepted/rejected ratio and how many issues should never have been filed as a
-bug, then how many issues are accepted versus rejected, which components carry
-the accepted load, rejection reasons, and lead-time statistics. Every grouping
-in the report prints its denominator.
+Measures how `n8n-io/n8n` handles incoming issues: how many are accepted as real
+work, how many are bounced at triage and why, which components carry the load,
+and how long fixes actually take. Publishes a dated markdown report on a weekly
+schedule from n8n Cloud.
 
-## The three repos
+**The headline it produces:** of 5,464 triaged issues, **54% are rejected at
+triage** — and 2,336 of them (43% of the whole population) were closed as
+`incomplete-template`, `support-issue` or `non-english`, meaning they arguably
+should never have entered the bug tracker.
 
-- `n8n-io/n8n` — the source. Issues are read via its GraphQL API, filtered to
-  the triage/team/closed label taxonomy in `src/lib/labels.js`.
-- `skomp/n8n-data` — the data store. Holds the newline-delimited JSON issue
-  snapshot (`issues.ndjson`) that this project reads and writes.
-- `skomp/n8n-reports` — the dated markdown reports (`reports/YYYY-MM-DD-triage.md`).
-- `skomp/n8n-test` (this repo) — the code. Library modules under `src/lib/`,
-  the local backfill CLI (`src/backfill.js`), the incremental sync
-  (`src/sync.js`), the n8n workflow generator (`build/build-workflows.js`),
-  the generated workflow JSON (`workflows/`), and the deploy script
-  (`scripts/deploy.sh`).
+---
 
-## The report window: two denominators, deliberately
-
-The store keeps full history, but the report does not use one population for
-everything. `rollup(issues, { windowDays = 180, now = new Date() })` computes:
-
-- **Windowed** (`createdAt >= now - windowDays`): intake and outcome, rejection
-  reasons, component, component coverage, triage funnel, monthly intake, and
-  the headline. Intake is a question about the recent past.
-- **Not windowed** — all history, always: all three lead-time measures.
-
-Windowing a lead time by the date the issue was *created* truncates the
-distribution at both ends, and it removes the slow half. Measured on the real
-5,464-record store, the median fix lead time is **25.3 days** over all history
-but **12.7 days** windowed — a 2x understatement that is pure truncation bias,
-not an improvement. The tail is the whole story of a lead-time distribution.
-
-`rollup()` therefore returns `total` as the **full** population and
-`window: { since, days, population }` as the windowed one, so every table in
-the report can print the denominator it was actually computed over. Each
-windowed section states its window; the lead-time section states that it is not
-windowed. See the comment at the top of `src/lib/rollup.js` before changing any
-of this.
-
-## Getting a token
-
-The backfill and sync scripts need a GitHub token with `Issues: read` and
-`Pull requests: read` scopes on `n8n-io/n8n`. A fine-grained personal access
-token works, as does a token from `gh auth token` if your `gh` session already
-has read access to that repository. Export it as `GITHUB_TOKEN`.
-
-## Running the backfill
-
-The backfill CLI fetches the full triaged-issue population and writes it to
-`data/issues.ndjson`:
+## Quick start
 
 ```bash
-GITHUB_TOKEN=$(gh auth token) node src/backfill.js data/issues.ndjson
+npm test                                        # 101 tests, zero dependencies
+GITHUB_TOKEN=$(gh auth token) npm run backfill  # one-off, ~3.5 min, writes data/issues.ndjson
 ```
 
-Measured against the live API: 55 pages, 385 rate-limit points, 5,464 issues,
-taking a few minutes. A materially different issue count means the label
-filter or pagination changed upstream — investigate before trusting the
-output.
+There is nothing to install. Node 24, no `npm install`, no lockfile, no
+`node_modules` — the project uses only `node --test`, native `fetch`, and the
+standard library. That is a deliberate constraint, not an accident: this code
+gets inlined into n8n Code nodes, which cannot import anything.
 
-Note: GitHub's GraphQL API enforces a secondary (abuse-detection) rate limit
-based on request frequency, separate from the point-based primary limit. If a
-run fails partway with an HTTP 403 naming a secondary rate limit, wait a few
-minutes and re-run the same command; the backfill is not incremental; a
-failed run does not write a partial file, so re-running is always safe.
+## Why this exists
 
-`data/` is git-ignored in this repo — the store belongs in `skomp/n8n-data`,
-not here.
+An earlier attempt at the same analysis **ran out of memory during
+aggregation**. That failure drove every significant decision here, so it is
+worth being precise about the cause.
 
-## Running the tests
+n8n holds every node's output array in memory for the entire execution. Fetch
+40,000 issues and fold them in a Code node, and you are holding 40,000 items at
+once. The fix is not a bigger heap — n8n Cloud does not let you set one — it is
+never letting the item count grow:
+
+- **The historical backfill does not run in n8n.** It is a local CLI, run once.
+  n8n only ever handles the daily delta, roughly 20 records.
+- **Every Code node takes one item and returns one item**, holding the store as
+  a text string. Never one item per issue. This is the single most important
+  invariant in the project and the generated code says so in a comment.
+- **Transport is GraphQL with explicit field selection.** Measured against the
+  live API: REST returns ~7,100 bytes per issue, a minimal GraphQL selection
+  returns ~498. The whole store is 2.9 MB rather than ~40 MB.
+
+Item *count* is what kills an n8n execution, not bytes. A 2.9 MB string in one
+item is fine; 5,464 items are not.
+
+## How it works
+
+| Repo | Holds |
+|---|---|
+| `skomp/n8n-test` (this) | Library, CLIs, workflow generator, deploy script |
+| `skomp/n8n-data` | `issues.ndjson` (5,464 records, 2.9 MB) and `state.json` (sync watermark) |
+| `skomp/n8n-reports` | `reports/YYYY-MM-DD-triage.md` |
+
+```
+                    ┌─ local, once ────────────────────────────┐
+GitHub GraphQL ────►│ src/backfill.js → data/issues.ndjson     │──► skomp/n8n-data
+                    └──────────────────────────────────────────┘
+                    ┌─ n8n Cloud, daily ───────────────────────┐
+GitHub GraphQL ────►│ HTTP Request (paginated) → Code (upsert) │──► skomp/n8n-data
+                    └──────────────────────────────────────────┘
+                    ┌─ n8n Cloud, weekly ──────────────────────┐
+skomp/n8n-data ────►│ HTTP Request → Code (rollup + render)    │──► skomp/n8n-reports
+                    └──────────────────────────────────────────┘
+```
+
+`build/build-workflows.js` generates the two workflows by inlining `src/lib/*`
+source into their Code nodes, so **the deployed logic cannot drift from the
+tested logic**. There is one implementation, not two.
+
+### Layout
+
+```
+src/lib/labels.js     The 33-label triage taxonomy
+src/lib/github.js     GraphQL client, cursor pagination
+src/lib/classify.js   segmentOf() and componentOf()
+src/lib/metrics.js    Lead times, median, p90
+src/lib/store.js      NDJSON parse/serialise/upsert
+src/lib/rollup.js     Aggregation
+src/lib/report.js     Markdown rendering
+src/backfill.js       One-off historical load (local)
+src/sync.js           Incremental sync with watermark
+build/                Workflow generator
+workflows/            Generated n8n workflow JSON
+scripts/deploy.sh     REST deploy (needs a paid n8n plan — see below)
+```
+
+## Design decisions a reviewer should push on
+
+**Only triaged issues are in scope.** 5,464 of 10,241, those carrying at least
+one `triage:*`, `team:*` or `closed:*` label. n8n does not label most
+community-filed issues, and there is **no severity label anywhere in the repo's
+120** — so grouping the rest would require inference. Restricting to the
+labelled population makes every published figure ground truth.
+
+**No LLM classifier.** One was costed at $4.20 for the full backfill on Haiku
+4.5 via the Batch API — cheap. It was rejected anyway, because a classifier
+gives different answers on different runs, so historical figures would shift
+underneath you. Inference presented as measurement is worse than a visible gap.
+
+**Component is only computed for accepted issues.** A bounced issue never gets
+a team label because it never becomes work; only 40 of 2,956 rejected issues
+have one. Coverage is **65% across all history but 95.3% over the last 180
+days** — n8n's labelling discipline has improved sharply, so the windowed
+report is far more complete than the lifetime figure suggests. Whatever the
+window, the gap is published as `unclassified` rather than hidden.
+
+**Intake windows to six months; lead times never do.** Windowing a lead time by
+creation date understates the median by 2× — 25.3 days becomes 12.7 — because
+slow issues fall outside a short window and the tail is the whole distribution.
+`rollup()` returns `total` (full population) and `window: {since, days,
+population}` so every table can print the denominator it actually used.
+
+**Medians and p90, never means.** Fix lead time is 25.3 days at the median and
+155.9 at p90. An average would be meaningless.
+
+## What the tests are for
+
+101 tests, and the number is not the point. Partway through, a mutation review
+seeded 17 deliberate bugs into a suite of 42 passing tests. **14 of them
+survived with the suite fully green** — including deleting the `mergedAt`
+filter, the single most load-bearing rule in the codebase.
+
+The tests were written to pass, not to fail. They have since been rebuilt so
+that every rule has a test that has been *watched failing* against a broken
+implementation, and the suite now catches all of them. If you change something
+here, hold that standard: **a test you have only ever seen pass has proven
+nothing.**
+
+Fixtures are 10 real records pulled from the live API plus 3 synthetic ones
+(numbers `9000xx`) covering branches real data does not exercise. Assertions are
+on decoded values — which component, how many days — never on shape.
+
+## Four bugs that only fail in production
+
+None of these is a coding error. Each is an assumption that holds in testing and
+breaks in production, and each was caught by checking against something real.
+They are documented because the class matters more than the instances.
+
+| What | How it would have failed |
+|---|---|
+| **GitHub's Contents API silently truncates >1 MB.** Returns HTTP 200, `encoding: "none"`, empty `content`. | Read store → empty → upsert 20 → write back. **Store drops 5,464 → 20 records and the run reports success.** Requires `Accept: application/vnd.github.raw` plus a non-empty guard before any write. |
+| **n8n's Code node has no network access.** `fetch`, `axios` and http modules fail at runtime. | The ingest workflow deploys clean, validates clean, dies at 3am on its first scheduled run. Fetching must happen in an HTTP Request node. |
+| **`closedByPullRequestsReferences` returns unmerged PRs.** 666 of 1,218 (55%) were closed without merging. | Fix lead time computed against `null`, and component attributed to an abandoned PR. |
+| **Scoped npm packages need three path segments.** | `packages/@n8n/db` truncated to `packages/@n8n` collapses ~40 packages into one fictitious bucket that would rank second-largest in the report. |
+
+The through-line: a check cheap enough that it cannot fail proves nothing.
+Reading a 136-byte `state.json` does not prove you can read a 2.9 MB
+`issues.ndjson`.
+
+## Deployment
+
+n8n's **public REST API is unavailable on the free trial**. `scripts/deploy.sh`
+targets it and is correct for a paid plan, but cannot run today.
+
+The instance-level **MCP server works instead** — it authorises over OAuth and
+is not tier-gated, unlike Git source control (Business/Enterprise only). So
+workflows can be authored offline and deployed as code without a paid plan:
 
 ```bash
-npm test
+claude mcp add --transport http n8n https://<instance>.app.n8n.cloud/mcp-server/http
 ```
 
-This runs the full suite with Node's built-in test runner
-(`node --test tests/*.test.js`). The project has zero runtime or dev
-dependencies.
+Node type versions are read from the live instance rather than assumed —
+`scheduleTrigger` 1.4, `httpRequest` 4.5, `code` 2. All three initial guesses
+were wrong, two of them silently.
 
-Use the glob form. `node --test tests/` (with a trailing slash) does not work
-in Node 24: it treats the directory as a module path and fails before the test
-runner starts. Verified on Node v24.19.0 — it exits **non-zero** with
-`Error: Cannot find module '<repo>/tests'` and `code: 'MODULE_NOT_FOUND'`.
-The failure is loud, so it cannot produce a false green; the glob is required
-because the directory form does not run, not because it runs silently.
+## Limits worth stating plainly
 
-### The test fixture
+- **This measures intake and triage, not delivery.** 98% of accepted issues
+  move into Linear, at which point GitHub stops being the system of record.
+  Do not read it as engineering throughput.
+- **35% of accepted issues have no component** across all history, though only
+  4.7% within the last 180 days. Reported as `unclassified` either way.
+- **Fix lead time covers 543 issues**, not 5,464 — only those with a linked PR
+  that actually merged.
+- **The backfill sometimes trips GitHub's secondary rate limit** around page 20
+  of 55. A five-minute cooldown clears it, and the CLI only writes on full
+  completion so retrying is safe.
+- **The four dominant rejection reasons are process problems, not engineering
+  ones** — a skipped issue template, no support channel, no non-English
+  routing. Acting on this report means changing intake, not code.
 
-`tests/fixtures/issues.sample.ndjson` holds **13 records: 10 real** ones
-captured from the live repository, then **3 synthetic** ones numbered 900001,
-900002 and 900003. Each synthetic record exists because a real one could not
-make a specific test able to fail:
+## Documentation
 
-- **900001 and 900002** — no real record reaches the merged-PR branch of
-  `componentOf` with an unmerged PR also linked, so the `mergedAt` filters in
-  `src/lib/classify.js` and `src/lib/metrics.js` had no test that could fail
-  when they were deleted. Both filters are load-bearing: 55% of linked PRs are
-  never merged.
-- **900003** — no real fixture record carried **two** `triage:*` labels, so
-  summing `triageStates` (a count of labels) happened to equal the count of
-  issues, and a funnel denominator built on that sum passed for the wrong
-  reason. On the real store the two differ: 1,546 labels across 1,309 issues.
-  900003 carries `triage:pending` and `triage:needs-info` so the two counts can
-  never coincide here again.
-
-Do not edit or reorder the 10 real records. Append new synthetic records at
-the end of the file, and update the tests that assert fixture-derived counts
-(`tests/rollup.test.js`, `tests/report.test.js`, `tests/store.test.js`,
-`tests/build.test.js`).
-
-Assert **decoded values**, not shapes. A test that only checks
-`median > 0` holds for almost any wrong number.
-
-## Building the workflows
-
-```bash
-node build/build-workflows.js
-```
-
-Regenerates `workflows/ingest.json` and `workflows/report.json` from the
-functions in `src/lib/`. Each Code node's script is the concatenated source of
-the relevant `src/lib/*.js` modules (imports and `export` keywords stripped)
-followed by a small driver, so the deployed logic is never a re-typed copy of
-the tested logic — `tests/build.test.js` exercises the same functions
-(`buildReportPayload`, `runIngest`, `fetchAllWithRetry`) that get embedded into
-the generated JSON via `Function.prototype.toString()`.
-
-Two constraints are load-bearing here, both from the design spec's section 5:
-
-- The **report** workflow's Code node receives the whole issue store as a
-  single item of text and returns a single item holding the rollup. It must
-  never emit one item per issue — n8n holds every node's output array in
-  memory for the whole run, and one item per issue (5,464+) reproduces the
-  out-of-memory failure this project exists to avoid. The generated Code node
-  carries a comment saying so.
-- The **ingest** workflow's Code node retries GitHub's secondary
-  (abuse-detection) rate limit with a 5-minute backoff — the real backfill hit
-  it around page 20 of 55 on two of three runs, and a 5-minute cooldown
-  cleared it every time. It never retries a stalled pagination cursor
-  (`fetchAll` throws on that deliberately): that is a hard failure, not a
-  transient one. `isStalledCursorError` / `isSecondaryRateLimitError` /
-  `fetchAllWithRetry` in `build/build-workflows.js` implement and test this
-  distinction.
-
-Node type versions (`n8n-nodes-base.scheduleTrigger`, `.httpRequest`, `.code`)
-could not be read from the live instance — the public API is unavailable on
-the free trial. `NODE_TYPE_VERSIONS` in `build/build-workflows.js` documents
-the conservative, widely-supported values used instead; confirm them against
-the instance before relying on the generated workflows. The same applies to
-two structural assumptions baked into the generated JSON: that the Code node
-can read `$env.GITHUB_TOKEN`, and that an HTTP Request node's
-`predefinedCredentialType: 'githubApi'` is the right way to attach the GitHub
-credential — neither is verifiable without the live instance.
-
-## Deployment is blocked on the free trial
-
-Per the design spec's section 9, n8n's public API is unavailable while the
-n8n Cloud instance is on the free trial plan. `scripts/deploy.sh` refuses to
-run without `N8N_API_KEY` set, printing a message naming the free-trial
-limitation and exiting non-zero:
-
-```bash
-$ unset N8N_API_KEY; bash scripts/deploy.sh; echo "exit=$?"
-scripts/deploy.sh: line 4: N8N_API_KEY: set N8N_API_KEY (Settings > n8n API). ...
-exit=1
-```
-
-That is the only deploy verification currently possible. Do not expect a
-successful deploy against the live instance until the plan changes (upgrade
-off the free trial) or an alternative route (e.g. the instance-level MCP
-server) is confirmed.
+- `docs/superpowers/specs/` — the design, with every measured figure and the
+  reasoning behind each decision
+- `docs/superpowers/plans/` — the implementation plan, including a correction
+  recording two requirements the plan dropped from its own spec
+- `docs/DECISIONS.md` — the decision trail
