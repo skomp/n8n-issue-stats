@@ -14,6 +14,7 @@ n8n Cloud as code, and memory-bounded so the aggregation cannot OOM again.
 - n8n Cloud instance: `skomp.app.n8n.cloud`. Not self-hosted.
 - Project repo: `skomp/n8n-test` (public, empty).
 - Data store repo: `skomp/n8n-data` (public, empty).
+- Reports repo: `skomp/n8n-reports` (public, empty).
 - Instance MCP server registered locally: `https://skomp.app.n8n.cloud/mcp-server/http`
   (this is n8n's *instance management* MCP server, not the MCP Server Trigger node).
   Needs a Claude Code restart before its tools are usable.
@@ -75,29 +76,57 @@ Batch API, 50% off, body capped at 2,000 chars (~620 in / 40 out tokens each):
 Cost is not a constraint. Reproducibility is: classify once, commit the verdict
 to the store, never re-classify unless the issue body changes.
 
+## Population measurements (triage scoping)
+
+| Definition | Issues | Share |
+|---|---|---|
+| any `triage:*` | 1,309 | 13% |
+| any `team:*` | 1,648 | 16% |
+| `triage:*` or `team:*` | 2,757 | 27% |
+| any `closed:*` | 2,956 | 29% |
+| **`triage:*` or `team:*` or `closed:*`** | **5,464** | **53%** |
+
+Triage lifecycle spread: pending 702, needs-info 608, complete 170, ping 30,
+in-progress 18, needs-reproduction 11, stalled 7.
+
+**Verified**: GraphQL `issues(labels: [...])` uses **OR** semantics
+(702 + 170 = 872 exactly). REST uses AND and search syntax uses OR — do not
+assume they match. Also avoid the GraphQL `search` connection: it hard-caps
+at 1,000 results, which is below our population.
+
 ## Decisions taken
 
-1. **Data scope**: full history, one-off bounded backfill, then incremental
-   sync on a watermark.
-2. **Storage**: files in git (`skomp/n8n-data`), NDJSON/Parquet.
-   **Sharded by month** (`data/issues/YYYY-MM.ndjson`) — a single large file
-   would reintroduce the OOM, since the GitHub Contents API replaces whole
-   files with the content base64-encoded in the request body.
-3. **Aggregation**: incremental rollup files updated in place, not a full
-   re-read of history. This is what permanently kills the OOM.
-4. **Severity**: LLM-assigned (critical/high/medium/low) with a confidence
-   score and one-line rationale, reported *alongside* the ground-truth
-   `triage:*` and `closed:*` axes so inference is always distinguishable
-   from GitHub's own data.
+1. **Data scope**: full history, one-off backfill, then incremental sync on a
+   watermark. Paginate ascending by `updated` — never descending.
+2. **Population**: triaged issues only — `triage:*` OR `team:*` OR `closed:*`
+   = **5,464 issues**. Fetched with a single label-filtered GraphQL connection.
+3. **No LLM classifier.** Component comes from `team:*` / `node/*` labels and,
+   where needed, the changed file paths of the closing PR mapped onto
+   `packages/*`. Deterministic and reproducible.
+4. **Severity is replaced by ground truth**: the `triage:*` lifecycle and the
+   `closed:*` outcome. Nothing in the output is inferred.
+5. **PR scope**: only PRs that close a triaged issue, obtained free via
+   `closedByPullRequestsReferences` nested in the issue query. No second
+   ingest path. Repo-wide PR metrics are explicitly out of scope.
+6. **Transport**: GraphQL with minimal field selection (~243 B/record vs
+   ~7.1 KB for REST).
+7. **Storage**: NDJSON in `skomp/n8n-data`.
+8. **Output**: dated markdown report committed to `skomp/n8n-reports`.
+
+## Consequence: the memory problem is largely designed away
+
+5,464 issues at ~243 B is roughly **1.3 MB** for the entire dataset — down from
+~267 MB for a full REST ingest of all 37,600 records. The elaborate sharding and
+incremental-rollup machinery considered earlier is no longer required to avoid
+an OOM. Keep the ingest streaming and page-at-a-time on principle, but do not
+build sharding for a dataset this size. (Revisit only if repo-wide PR ingest is
+ever added back to scope.)
 
 ## Open questions
 
-- [ ] Which n8n Cloud plan is `skomp` on? Decides gateway-credit allowance and
-      whether Git source control is available.
-- [ ] Gateway credit -> token conversion rate (`app.n8n.cloud/service-pricing`,
-      login-gated). Decides whether the backfill fits a monthly allowance.
-- [ ] Classifier model (Haiku 4.5 / Sonnet 5 / Opus 5 / escalate-on-low-confidence).
-- [ ] Component strategy: labels + PR file paths + LLM fallback — needs confirming.
+- [ ] Which n8n Cloud plan is `skomp` on? Decides whether n8n's native Git
+      source control (Business/Enterprise only) is available as a deploy path.
 - [ ] Deployment mechanism: `kodflow/n8n` Terraform provider vs the public API
-      from CI vs the new `n8n-cli` package format vs the instance MCP server.
-- [ ] What the output actually is (dashboard? committed markdown report? Slack?).
+      from CI vs the `n8n-cli` package format vs the instance MCP server.
+- [ ] Report contents: which stats beyond component grouping, triage-flow
+      breakdown and lead times.
