@@ -122,11 +122,26 @@ an OOM. Keep the ingest streaming and page-at-a-time on principle, but do not
 build sharding for a dataset this size. (Revisit only if repo-wide PR ingest is
 ever added back to scope.)
 
+## Superseded by the spec
+
+The full design now lives in
+`docs/superpowers/specs/2026-09-06-n8n-github-triage-analytics-design.md`.
+This file remains as the decision trail. The spec is authoritative.
+
+## Late finding: the accepted/rejected seam
+
+Measured after the full backfill (5,464 records):
+
+| Segment | Issues | Share |
+|---|---|---|
+| Rejected at triage (`closed:*`) | 2,956 | 54% |
+| Accepted | 2,508 | 46% |
+
+Component coverage within accepted is 68%; only 40 rejected issues carry a
+`team:*` label, and every unclassified issue is closed. Component is a property
+of accepted work, so component grouping applies to the accepted segment only.
+
 ## Open questions
 
-- [ ] Which n8n Cloud plan is `skomp` on? Decides whether n8n's native Git
-      source control (Business/Enterprise only) is available as a deploy path.
-- [ ] Deployment mechanism: `kodflow/n8n` Terraform provider vs the public API
-      from CI vs the `n8n-cli` package format vs the instance MCP server.
-- [ ] Report contents: which stats beyond component grouping, triage-flow
-      breakdown and lead times.
+- [ ] Which n8n Cloud plan is `skomp` on? Does not block implementation.
+- [ ] Report cadence — weekly assumed, needs confirming.

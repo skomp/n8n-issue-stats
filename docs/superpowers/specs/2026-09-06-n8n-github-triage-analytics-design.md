@@ -1,0 +1,376 @@
+# n8n GitHub Triage Analytics — Design
+
+Date: 2026-09-06
+Status: approved in brainstorm, ready for implementation planning
+
+## 1. Goal
+
+Ingest the triaged issues of `n8n-io/n8n`, group them by component and by triage
+outcome, calculate lead times, and publish a dated markdown report. Author the
+workflows offline in git and deploy them to n8n Cloud with a script.
+
+The pipeline must stay memory-bounded. An earlier attempt by the owner failed
+with an out-of-memory error in the aggregation step.
+
+## 2. Measured facts — do not re-derive
+
+Every number below was measured against the live API on 2026-09-06. An
+implementer must not spend budget re-establishing them.
+
+### Repository scale
+
+| Fact | Value |
+|---|---|
+| Issues in `n8n-io/n8n` | 10,241 (381 open) |
+| Pull requests | 27,382 (20,966 merged) |
+| New issues + PRs per month | ~2,000 |
+| Distinct labels | 120 |
+
+### Transport
+
+| Fact | Value |
+|---|---|
+| REST payload per record | ~7,100 bytes |
+| GraphQL payload per record, minimal fields | ~243 bytes |
+| GraphQL payload per record, with PR file paths | ~498 bytes |
+| REST rate limit | 5,000 requests/hour |
+| GraphQL rate limit | 5,000 points/hour |
+
+### The backfill, measured end to end
+
+A complete backfill ran successfully during design:
+
+| Fact | Value |
+|---|---|
+| Pages fetched | 55 |
+| Rate-limit points consumed | **385 of 5,000** |
+| Records retrieved | **5,464** |
+| Wall time | ~3.5 minutes |
+| Store size on disk | 2.7 MB |
+
+The record count matches the GitHub search API count for the same label set
+exactly, which validates both the label filter and the pagination.
+
+### Query cost, measured not computed
+
+| Query | Measured cost |
+|---|---|
+| 100 issues + 5 closing PRs | 2 points |
+| 100 issues + 5 closing PRs + 100 file paths each | 6 points |
+| 100 PRs + 100 file paths each | 1 point |
+
+A calculation from GitHub's documented point formula predicted 506 points for
+the second query. The measured cost is 6. **Do not compute GraphQL point costs
+from the formula — measure them.** This finding removed a two-phase fetch from
+the design.
+
+### API semantics verified by experiment
+
+| Behaviour | Result |
+|---|---|
+| GraphQL `issues(labels: [a, b])` | **OR** — 702 + 170 returned 872 |
+| REST `labels=a,b` | AND (per GitHub docs) |
+| Search syntax `label:a,b` | OR |
+| GraphQL `filterBy: {since:}` | Works, composes with `orderBy: UPDATED_AT ASC` |
+| `Issue.closedByPullRequestsReferences` | GA, returns the closing PR with `mergedAt` |
+| GraphQL `search` connection | Hard-capped at 1,000 results — unusable here |
+
+## 3. The population
+
+"Triaged" means the issue carries at least one of 33 labels, in three families:
+
+- `triage:*` — 9 labels (pending, in-progress, needs-info, needs-reproduction,
+  ready-for-review, complete, stalled, ping, tests-needed)
+- `team:*` — 15 labels (nodes, ai, api, iam, chat, design, qa-dx, lifecycle,
+  relay, identity, cats, payday, adore, ins, instance-ai)
+- `closed:*` — 9 labels (duplicate, cant-reproduce, working-as-expected,
+  support-issue, incomplete-template, enhancement/feature, info, non-english,
+  requested)
+
+This yields **5,464 issues, 53% of all issues** in the repository.
+
+### Why not all 10,241 issues
+
+n8n does not label most community-filed issues. Only 17% carry a `team:*`
+label. There is **no severity label anywhere in the 120** — no `severity:*`,
+no `priority:*`, no P0/P1/P2. Grouping unlabelled issues would require an
+LLM classifier, which the owner rejected. Restricting to the labelled
+population makes every figure ground truth.
+
+## 4. Key structural finding: the accepted/rejected seam
+
+The population splits cleanly, and this shapes the entire report:
+
+| Segment | Issues | Share |
+|---|---|---|
+| **Rejected at triage** (has a `closed:*` reason) | 2,956 | 54% |
+| **Accepted** (no rejection reason) | 2,508 | 46% |
+
+Within the accepted segment:
+
+| | Issues | Share of accepted |
+|---|---|---|
+| Carries a `team:*` label | 1,608 | 64% |
+| Tracked in Linear (`status:in-linear` / `in linear`) | 2,469 | 98% |
+| Component derived from closing-PR file paths | +93 | 4% |
+| Unclassified | 807 | 32% |
+| **Component coverage** | | **68%** |
+
+Only **40** rejected issues carry a `team:*` label, and **every** unclassified
+issue is CLOSED — not one is open.
+
+**Interpretation.** Component is a property of accepted work, not of every
+issue. An issue closed as `incomplete-template` or `support-issue` has no
+component because it never became work. The 32% unclassified figure is
+therefore not a data-quality problem to be fixed; it is a real property of
+the triage process.
+
+**Consequence for the report.** Component grouping applies to the accepted
+segment only. The rejected segment is analysed by rejection reason instead.
+The headline metric is the ratio itself: more than half of triaged issues
+never become work.
+
+Note also that n8n moves accepted issues into Linear. GitHub stops being the
+system of record at that point, so this pipeline measures **intake and
+triage**, not delivery. Do not present it as a measure of engineering output.
+
+## 5. Architecture
+
+### Repositories
+
+| Repo | Contents |
+|---|---|
+| `skomp/n8n-test` | Workflow JSON, deploy script, this spec |
+| `skomp/n8n-data` | `issues.ndjson`, `state.json` (watermark) |
+| `skomp/n8n-reports` | `reports/YYYY-MM-DD-triage.md` |
+
+All three exist and are public.
+
+### Moving parts
+
+1. **Backfill script** — runs locally, once. Fetches all 5,464 records and
+   writes the initial `issues.ndjson` to `n8n-data`. Proven: 55 pages,
+   385 points, 3.5 minutes.
+2. **Ingest workflow** — n8n Cloud, scheduled daily. Reads the watermark,
+   fetches only issues updated since, upserts by issue number, writes the
+   watermark back.
+3. **Report workflow** — n8n Cloud, scheduled weekly. Reads the store,
+   computes rollups, renders markdown, commits to `n8n-reports`.
+4. **Deploy script** — runs locally. Pushes workflow JSON from `n8n-test`
+   to n8n Cloud through the public API.
+
+### How the out-of-memory failure is prevented
+
+Three independent measures. The first is the one that matters:
+
+1. **The backfill never runs in n8n.** It runs locally, once. n8n only ever
+   handles the daily delta — on the order of 20 records.
+2. **The report workflow never converts the store into n8n items.** It fetches
+   `issues.ndjson` as a *single* text item, parses and folds it inside one
+   Code node, and emits only the rollup object. One item in, one item out.
+   n8n holds every node's output array in memory for the whole execution, so
+   5,464 items would reintroduce the original failure.
+3. **Transport is GraphQL with explicit field selection.** 498 bytes per
+   record against ~7,100 for REST — a 14x reduction on the fields we need,
+   and the whole store is 2.7 MB.
+
+**Deliberately not built:** monthly shard files and incremental rollup files.
+Both were designed and then dropped once the dataset was measured at 2.7 MB.
+Reintroduce them only if repo-wide PR ingest is ever added to scope.
+
+## 6. Ingest contract
+
+### Query
+
+This exact query ran 55 times during design with no errors. Page size 100,
+ordered ascending.
+
+```graphql
+query($cursor: String, $labels: [String!]!, $since: DateTime) {
+  rateLimit { cost remaining }
+  repository(owner: "n8n-io", name: "n8n") {
+    issues(first: 100, after: $cursor, labels: $labels,
+           filterBy: {since: $since},
+           orderBy: {field: UPDATED_AT, direction: ASC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number title state createdAt updatedAt closedAt
+        author { login }
+        labels(first: 30) { nodes { name } }
+        reactions { totalCount }
+        comments { totalCount }
+        closedByPullRequestsReferences(first: 5, includeClosedPrs: true) {
+          nodes { number createdAt mergedAt
+                  files(first: 100) { nodes { path } } }
+        }
+      }
+    }
+  }
+}
+```
+
+Omit `filterBy` for the backfill; supply it for incremental runs.
+
+### Ordering is a correctness requirement, not a preference
+
+Pagination MUST be ascending by `updatedAt`. GitHub's `direction: DESC` on
+`updated` has a documented race: records that change mid-crawl shift between
+pages, so items are silently skipped or duplicated. Ascending order means
+newly-updated records append behind the cursor instead of displacing pages
+already read.
+
+### Watermark
+
+`state.json` in `n8n-data` holds the highest `updatedAt` observed. Each run
+queries `since = watermark - 5 minutes` to absorb clock skew, and de-duplicates
+on upsert by issue `number`. The overlap is deliberate: duplicates are cheap,
+gaps are silent and permanent.
+
+### Upsert
+
+`issues.ndjson` is keyed by issue `number`. A record with an existing number
+replaces it; a new number appends. Ordering within the file is not significant.
+
+## 7. Component derivation
+
+Deterministic, no inference. First match wins:
+
+1. `team:*` label present -> that team name
+2. `node/*` label present -> `nodes`
+3. Ad-hoc label present (`core`, `ui`, `dx`, `deployment`, `performance`,
+   `security`) -> that name
+4. Closing PR's changed paths -> the `packages/<name>` prefix holding the most
+   changed files
+5. Otherwise -> `unclassified`
+
+Applied to the accepted segment only. Measured coverage: 68%.
+
+**Note on steps 2 and 3:** both matched zero issues in the measured population,
+because `node/*` and the ad-hoc labels never co-occur with the 33 filter
+labels. They are retained because they cost nothing and n8n's labelling may
+change. An implementer should not be alarmed by them matching nothing, and
+should not delete them on the assumption they are broken.
+
+The n8n monorepo's real package list — the target vocabulary for step 4 — is
+`packages/{cli, core, extensions, frontend, modules, node-dev, nodes-base,
+testing, workflow}` plus ~40 scoped packages under `packages/@n8n/`.
+
+## 8. Report contents
+
+Written to `skomp/n8n-reports/reports/YYYY-MM-DD-triage.md`.
+
+### Headline
+
+The accepted/rejected ratio, and the count of issues rejected for reasons that
+suggest the issue should never have been filed as a bug
+(`incomplete-template`, `support-issue`, `non-english`). Measured today:
+**2,336 issues, 43% of the triaged population.**
+
+### Sections
+
+1. **Intake and outcome** — accepted vs rejected, with the trend by month.
+2. **Rejection reasons** — breakdown of the 2,956 rejected issues by
+   `closed:*` reason. Measured distribution across the 5,464-issue population:
+
+   | Reason | Issues |
+   |---|---|
+   | `closed:incomplete-template` | 1,150 |
+   | `closed:support-issue` | 955 |
+   | `closed:enhancement/feature` | 239 |
+   | `closed:non-english` | 234 |
+   | `closed:working-as-expected` | 129 |
+   | `closed:duplicate` | 115 |
+   | `closed:cant-reproduce` | 79 |
+   | `closed:requested` | 68 |
+   | `closed:info` | 19 |
+
+   These sum to more than 2,956 because an issue may carry several reasons.
+3. **Component** — accepted issues by component, with the coverage figure
+   stated on the table.
+4. **Triage funnel** — counts by `triage:*` state.
+5. **Lead times** — three distinct measures:
+   - issue `createdAt` -> `closedAt`
+   - issue `createdAt` -> closing PR `mergedAt` (fix lead time)
+   - closing PR `createdAt` -> `mergedAt`
+6. **Coverage and caveats** — population size, what fraction is unclassified,
+   and an explicit statement that Linear-tracked work is invisible here.
+
+### Statistical rules
+
+- **Report median and p90, never mean.** Lead-time distributions on a public
+  repository have a long tail; a handful of multi-year-old issues drag any
+  average into meaninglessness.
+- **Always print the denominator.** Every grouping states what share of the
+  population it covers. `unclassified` is a visible row, never dropped.
+
+## 9. Deployment
+
+A script run locally pushes workflow JSON to
+`https://skomp.app.n8n.cloud/api/v1/workflows`, authenticating with the
+`X-N8N-API-KEY` header.
+
+### Why not the alternatives
+
+| Option | Rejected because |
+|---|---|
+| Terraform `kodflow/n8n` | Single-maintainer community provider (19 stars). Viable, but a third-party dependency on the deploy path for three workflows. |
+| Terraform `devops247-online/n8n` | **Source repository returns 404.** The binary is downloadable but unauditable. Do not use. |
+| Official `n8n-cli` / `.n8np` packages | Explicitly Preview — "the package format and API may change". |
+| n8n native Git source control | Business/Enterprise plans only. `skomp`'s plan is unconfirmed. |
+| GitHub Actions | The owner chose local execution. Note for the record that Actions is free with unlimited minutes on public repositories, so this constraint is optional. |
+
+### Fields to strip before committing workflow JSON
+
+These are instance-specific and cause collisions on import:
+`id`, `versionId`, `versionCounter`, `activeVersionId`, `sourceWorkflowId`,
+`node.id`, `node.webhookId`, `meta.instanceId`, `shared[]`, `staticData`,
+`tags[].id`, and all `createdAt`/`updatedAt` timestamps.
+
+Credential references travel as id + name + type only. Secrets never appear in
+exported workflow JSON, by design. On import n8n matches an existing credential
+of the same type or creates an empty placeholder.
+
+## 10. Secrets
+
+| Secret | Held by | Purpose |
+|---|---|---|
+| GitHub fine-grained PAT | n8n credential | Read issues/PRs on a public repo; write contents on `n8n-data` and `n8n-reports` |
+| n8n API key | Local environment only | Deploy workflows |
+
+The GitHub token needs `Issues: read`, `Pull requests: read`, `Metadata: read`
+on `n8n-io/n8n`, and `Contents: write` on the two owned repos. No write access
+to `n8n-io/n8n` is required or should be granted.
+
+## 11. Verification
+
+Checks that assert values, not shapes:
+
+- Backfill returns exactly 5,464 records for the 33-label filter, matching the
+  search API count.
+- Accepted + rejected sums to the total; the rejected count equals the count of
+  issues carrying any `closed:*` label.
+- A known issue with a known closing PR yields the correct `mergedAt` and a
+  correctly signed, non-zero lead time.
+- Running the incremental sync twice in a row produces no duplicate issue
+  numbers in the store.
+- A component derived from PR paths is asserted on its **decoded value** (which
+  package), not merely on the fact that a rule fired.
+- The report workflow's peak memory does not scale with store size: verify the
+  Code node receives one item, not thousands.
+
+## 12. Out of scope
+
+- Repo-wide PR metrics across all 27,382 PRs. Only PRs closing a triaged issue
+  are ingested, and they arrive free inside the issue query.
+- LLM classification of unlabelled issues. Rejected by the owner. Cost was
+  measured at $4.20 for a full backfill on Haiku 4.5 via the Batch API, so the
+  constraint was reproducibility and complexity, not money.
+- Severity scoring. No severity label exists; triage state and closure reason
+  are used instead.
+- Anything about work after it enters Linear.
+
+## 13. Open questions
+
+- Which n8n Cloud plan is `skomp` on? Affects only whether native Git source
+  control was ever an option. Does not block implementation.
+- Report cadence: weekly is assumed. Confirm before implementation.
