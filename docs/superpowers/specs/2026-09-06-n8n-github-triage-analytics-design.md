@@ -114,10 +114,18 @@ Within the accepted segment:
 | Tracked in Linear (`status:in-linear` / `in linear`) | 2,469 | 98% |
 | Component derived from closing-PR file paths | +93 | 4% |
 | Unclassified | 807 | 32% |
-| **Component coverage** | | **68%** |
+| **Component coverage** | | **65%** |
 
 Only **40** rejected issues carry a `team:*` label, and **every** unclassified
 issue is CLOSED — not one is open.
+
+> **Correction, 2026-09-06.** An earlier revision of this spec stated component
+> coverage as **68%**. That figure was wrong. It was measured with an ad-hoc query that
+> counted every linked pull request as component evidence, including the 55% that were
+> closed without merging — which contradicts this spec's own rule in section 7 that only
+> merged PRs may contribute. Recomputed correctly against the full 5,464-record store,
+> the figure is **65%**. The implementation was right and the original measurement was
+> wrong; no code changed as a result of this correction.
 
 **Interpretation.** Component is a property of accepted work, not of every
 issue. An issue closed as `incomplete-template` or `support-issue` has no
@@ -243,7 +251,7 @@ Deterministic, no inference. First match wins:
    changed files
 5. Otherwise -> `unclassified`
 
-Applied to the accepted segment only. Measured coverage: 68%.
+Applied to the accepted segment only. Measured coverage: **65%**.
 
 **Note on steps 2 and 3:** both matched zero issues in the measured population,
 because `node/*` and the ad-hoc labels never co-occur with the 33 filter

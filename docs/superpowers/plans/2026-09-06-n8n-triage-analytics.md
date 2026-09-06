@@ -32,7 +32,7 @@
 |---|---|
 | Triaged population | 5,464 issues (33 labels, OR semantics) |
 | Rejected at triage / accepted | 2,956 / 2,508 |
-| Component coverage within accepted | 68% |
+| Component coverage within accepted | 65% |
 | Full backfill | 55 pages, 385 of 5,000 rate-limit points, ~3.5 min, 2.7 MB |
 | GraphQL `issues(labels:)` | OR semantics (verified) |
 | Ingest query cost | 6 points per 100-issue page (measured, not computed) |
@@ -1129,7 +1129,7 @@ import('./src/lib/rollup.js').then(async ({rollup}) => {
   const r = rollup(rs);
   console.log('accepted', r.segments.accepted, '(expect 2508)');
   console.log('rejected', r.segments.rejected, '(expect 2956)');
-  console.log('coverage', Math.round(r.componentCoverage*100)+'%', '(expect ~68%)');
+  console.log('coverage', Math.round(r.componentCoverage*100)+'%', '(expect 65%)');
 });"
 ```
 

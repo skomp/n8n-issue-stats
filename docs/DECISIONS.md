@@ -137,7 +137,7 @@ Measured after the full backfill (5,464 records):
 | Rejected at triage (`closed:*`) | 2,956 | 54% |
 | Accepted | 2,508 | 46% |
 
-Component coverage within accepted is 68%; only 40 rejected issues carry a
+Component coverage within accepted is 65%; only 40 rejected issues carry a
 `team:*` label, and every unclassified issue is closed. Component is a property
 of accepted work, so component grouping applies to the accepted segment only.
 
