@@ -111,7 +111,16 @@ skomp/n8n-data ────►│ HTTP Request → Code (rollup + render)    │
                     └──────────────────────────────────────────┘
 ```
 
+Each canvas below carries sticky notes explaining **why** it is shaped the way
+it is — not what the nodes are called. The facts they record (why the store read
+needs a raw media type, why the Merge passes no data, why a 404 on a sha read is
+not an error) cost real work to establish and are invisible from the graph.
+Someone who "simplifies" any of them breaks the pipeline in a way that stays
+green.
+
 ### The ingest workflow runs two branches at once
+
+![The ingest workflow in n8n: a schedule trigger and a sub-workflow trigger each fanning out to two parallel branches, joined by a Merge node before the store is upserted and written back](docs/images/workflow-ingest.png)
 
 ```
 Daily ─┬─► Read state.json ────────► Plan fetch ─► Fetch issues ─┬─► Merge
@@ -131,6 +140,8 @@ store write leaves the next run re-fetching the same window instead of skipping
 it.
 
 ### The report workflow publishes three files, and a re-run is safe
+
+![The report workflow in n8n: read the store, render the rollup, look up three blob shas, then write markdown, HTML and index.html](docs/images/workflow-report.png)
 
 ```
 Weekly ─► Read issues.ndjson ─► Rollup and render
@@ -203,6 +214,8 @@ that **no note covers a functional node or another note** — a note drawn over 
 node hides it, and n8n gives no warning.
 
 ### The orchestrator runs the two in sequence
+
+![The orchestrator workflow in n8n: a weekly schedule running the ingest sub-workflow to completion, then the report](docs/images/workflow-orchestrator.png)
 
 ```
 Weekly ─► Run ingest ─► Run report
