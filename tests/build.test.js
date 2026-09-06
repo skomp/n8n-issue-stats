@@ -11,6 +11,7 @@ import {
   issuesFromPages,
   applyPages,
   buildReportPayload,
+  planIndexWrite,
   buildIngestWorkflow,
   buildReportWorkflow,
   renderWorkflowFile,
@@ -46,6 +47,12 @@ const acceptOf = node => node.parameters.headerParameters.parameters.find(h => h
 // Runs a generated Code node's jsCode the way n8n does: a bare function body
 // with the n8n globals injected. This is what proves the INLINED source is
 // valid standalone JavaScript, not just that the build produced a string.
+//
+// A `nodes` entry may be a single json object (a node that emitted one item)
+// or an ARRAY of them (a node that emitted several — "Fetch issues" emits one
+// item per GraphQL page). Both `.first()` and `.all()` are provided, because
+// since the ingest workflow was parallelised "Upsert store" reaches its pages
+// through $('Fetch issues').all() rather than through its own $input.
 function runCodeNode(jsCode, { items = [], nodes = {} } = {}) {
   const $input = {
     all: () => items,
@@ -53,7 +60,11 @@ function runCodeNode(jsCode, { items = [], nodes = {} } = {}) {
   };
   const $ = name => {
     if (!(name in nodes)) throw new Error(`test stub: no node named "${name}"`);
-    return { first: () => ({ json: nodes[name] }) };
+    const list = Array.isArray(nodes[name]) ? nodes[name] : [nodes[name]];
+    return {
+      first: () => ({ json: list[0] }),
+      all: () => list.map(json => ({ json })),
+    };
   };
   return new Function('$input', '$', jsCode)($input, $);
 }
@@ -451,6 +462,7 @@ test('every generated node type version matches NODE_TYPE_VERSIONS', () => {
     'n8n-nodes-base.scheduleTrigger': 1.4,
     'n8n-nodes-base.httpRequest': 4.5,
     'n8n-nodes-base.code': 2,
+    'n8n-nodes-base.merge': 3.2,
   });
   for (const build of [buildIngestWorkflow, buildReportWorkflow]) {
     for (const node of build().nodes) {
@@ -484,9 +496,13 @@ test('the generated "Upsert store" node returns exactly ONE item however many pa
     page([{ number: 999002, updatedAt: '2026-09-06T09:00:00Z' }]),
   ];
 
+  // $input is the Merge barrier's single EMPTY item, exactly as n8n delivers
+  // it: chooseBranch/waitForAll with output "empty" pushes one `{ json: {} }`.
+  // Every real input is reached by node name.
   const out = runCodeNode(jsCode, {
-    items: pages.map(json => ({ json })),
+    items: [{ json: {} }],
     nodes: {
+      'Fetch issues': pages,
       'Read issues.ndjson': { data: fixtureText },
       'Read issues.ndjson sha': { sha: 'storesha' },
       'Read state.json': { content: b64(fixtureState(FIXTURE_RECORDS)), sha: 'statesha' },
@@ -507,8 +523,9 @@ test('the generated "Upsert store" node fails the run on a truncated store read'
   // 200 with an empty body, so $json.data is "".
   const jsCode = nodeNamed(buildIngestWorkflow(), 'Upsert store').parameters.jsCode;
   assert.throws(() => runCodeNode(jsCode, {
-    items: [{ json: page([{ number: 1, updatedAt: '2026-09-06T08:00:00Z' }]) }],
+    items: [{ json: {} }],
     nodes: {
+      'Fetch issues': [page([{ number: 1, updatedAt: '2026-09-06T08:00:00Z' }])],
       'Read issues.ndjson': { data: '' },
       'Read issues.ndjson sha': { sha: 'storesha' },
       'Read state.json': { content: b64(realStateText), sha: 'statesha' },
@@ -529,6 +546,267 @@ test('the generated "Rollup and render" node reads raw text and returns ONE item
 test('the generated "Rollup and render" node fails on a truncated store read', () => {
   const jsCode = nodeNamed(buildReportWorkflow(), 'Rollup and render').parameters.jsCode;
   assert.throws(() => runCodeNode(jsCode, { items: [{ json: { data: '' } }] }), /read back EMPTY/);
+});
+
+// --- The parallelised ingest graph ------------------------------------------
+//
+// The GraphQL fetch and the 2.86 MB store download are independent: the query
+// needs only the watermark out of state.json. Running them concurrently is the
+// whole point of the Merge barrier, so these assert the SHAPE of the fan-out
+// and the fan-in, by target and by input index.
+
+test('the trigger fans out into two concurrent branches', () => {
+  const { connections } = buildIngestWorkflow();
+  assert.deepEqual(
+    connections.Daily.main[0].map(c => c.node),
+    ['Read state.json', 'Read issues.ndjson sha'],
+    'Daily must start BOTH branches, not one chain',
+  );
+  // The fetch branch must not wait on the store, and vice versa. Naming the
+  // exact successor is what catches a re-serialised graph: a chain would put
+  // "Read issues.ndjson sha" downstream of "Read state.json".
+  assert.deepEqual(connections['Read state.json'].main[0].map(c => c.node), ['Plan fetch']);
+  assert.deepEqual(connections['Plan fetch'].main[0].map(c => c.node), ['Fetch issues']);
+  assert.deepEqual(connections['Read issues.ndjson sha'].main[0].map(c => c.node), ['Read issues.ndjson']);
+});
+
+test('both branches fan back in to the Merge, on different input indexes', () => {
+  const { connections } = buildIngestWorkflow();
+  // Connection indexes are 0-BASED on the wire. Input 1 in the UI is index 0.
+  assert.deepEqual(connections['Fetch issues'].main[0], [{ node: 'Merge', type: 'main', index: 0 }]);
+  assert.deepEqual(connections['Read issues.ndjson'].main[0], [{ node: 'Merge', type: 'main', index: 1 }]);
+  // Two branches into two DIFFERENT inputs. Both on index 0 would make the
+  // Merge see one input with everything on it and never wait for the other.
+  const indexes = [
+    connections['Fetch issues'].main[0][0].index,
+    connections['Read issues.ndjson'].main[0][0].index,
+  ];
+  assert.deepEqual([...new Set(indexes)].sort(), [0, 1]);
+  assert.deepEqual(connections.Merge.main[0].map(c => c.node), ['Upsert store']);
+});
+
+test('the Merge is a synchronisation barrier, never a data join', () => {
+  const merge = nodeNamed(buildIngestWorkflow(), 'Merge');
+  assert.equal(merge.type, 'n8n-nodes-base.merge');
+  assert.equal(merge.typeVersion, 3.2, 'verified against the live instance');
+  // Literals on purpose: comparing against the build's own constant would make
+  // this agree with whatever the build says.
+  assert.deepEqual(merge.parameters, {
+    mode: 'chooseBranch',
+    numberInputs: 2,
+    chooseBranchMode: 'waitForAll',
+    output: 'empty',
+  });
+  // "Fetch issues" emits one item per GraphQL page and the store branch emits
+  // one, so any combine mode produces an N x 1 cartesian output and silently
+  // multiplies the 2.86 MB store by the page count.
+  assert.notEqual(merge.parameters.mode, 'combine');
+  assert.ok(!('combineBy' in merge.parameters));
+});
+
+test('"Upsert store" reads its pages from "Fetch issues" by name, not from the barrier', () => {
+  // The discriminator: $input carries THREE decoy pages, "Fetch issues" carries
+  // TWO. A driver that still read $input.all() would report fetched: 3.
+  const jsCode = nodeNamed(buildIngestWorkflow(), 'Upsert store').parameters.jsCode;
+  const out = runCodeNode(jsCode, {
+    items: [
+      { json: page([{ number: 111, updatedAt: '2026-09-06T08:00:00Z' }]) },
+      { json: page([{ number: 222, updatedAt: '2026-09-06T08:00:00Z' }]) },
+      { json: page([{ number: 333, updatedAt: '2026-09-06T08:00:00Z' }]) },
+    ],
+    nodes: {
+      'Fetch issues': [
+        page([{ number: 999001, updatedAt: '2026-09-06T08:00:00Z' }]),
+        page([{ number: 999002, updatedAt: '2026-09-06T09:00:00Z' }]),
+      ],
+      'Read issues.ndjson': { data: fixtureText },
+      'Read issues.ndjson sha': { sha: 'storesha' },
+      'Read state.json': { content: b64(fixtureState(FIXTURE_RECORDS)), sha: 'statesha' },
+    },
+  });
+
+  assert.equal(out[0].json.fetched, 2, 'the pages must come from $(\'Fetch issues\'), not from $input');
+  assert.equal(out[0].json.records, FIXTURE_RECORDS + 2);
+  // The decoys must be nowhere in the written store.
+  const written = Buffer.from(out[0].json.storeContent, 'base64').toString('utf8');
+  assert.ok(written.includes('999001'), 'the fetched issue is missing from the store');
+  assert.ok(!written.includes('"number":111'), 'a $input decoy leaked into the store');
+});
+
+test('"Upsert store" still reaches state.json across the branch split', () => {
+  // state.json moved onto the OTHER branch, so the truncation guard's record
+  // count is only reachable by node name. If that reference broke, the guard
+  // would silently degrade to the empty-store check alone and a SHORT read
+  // would be written back.
+  const jsCode = nodeNamed(buildIngestWorkflow(), 'Upsert store').parameters.jsCode;
+  assert.throws(() => runCodeNode(jsCode, {
+    items: [{ json: {} }],
+    nodes: {
+      'Fetch issues': [page([])],
+      'Read issues.ndjson': { data: fixtureText },   // 13 records
+      'Read issues.ndjson sha': { sha: 'storesha' },
+      'Read state.json': { content: b64(realStateText), sha: 'statesha' }, // records: 5464
+    },
+  }), /read back 13 record\(s\) but state\.json records 5464/);
+});
+
+// --- index.html: the write that needs a sha, and cannot always have one ------
+
+test('planIndexWrite omits the sha on the first run, when the read 404s', () => {
+  const body = planIndexWrite(
+    { statusCode: 404, body: { message: 'Not Found' } },
+    { message: 'publish', content: 'YmFzZTY0' },
+  );
+  assert.deepEqual(body, { message: 'publish', content: 'YmFzZTY0' });
+  assert.ok(!('sha' in body), 'a create must not send a sha');
+});
+
+test('planIndexWrite includes the sha the read returned, verbatim', () => {
+  const body = planIndexWrite(
+    { statusCode: 200, body: { sha: 'd0f4e1c2b3a49586', path: 'index.html' } },
+    { message: 'publish', content: 'YmFzZTY0' },
+  );
+  assert.equal(body.sha, 'd0f4e1c2b3a49586');
+  assert.deepEqual(Object.keys(body).sort(), ['content', 'message', 'sha']);
+});
+
+test('planIndexWrite refuses a status it cannot interpret rather than guessing', () => {
+  // A 500 or a 403 says NOTHING about whether index.html exists. Treating it
+  // as "no sha" turns a transient upstream failure into a 422 on the write,
+  // where the real cause is invisible.
+  assert.throws(
+    () => planIndexWrite({ statusCode: 500, body: {} }, { message: 'm', content: 'c' }),
+    /HTTP 500[\s\S]*Only 404 means/,
+  );
+  assert.throws(
+    () => planIndexWrite({ statusCode: 403, body: {} }, { message: 'm', content: 'c' }),
+    /HTTP 403/,
+  );
+});
+
+test('planIndexWrite refuses a 200 that carried no blob sha', () => {
+  assert.throws(
+    () => planIndexWrite({ statusCode: 200, body: { path: 'index.html' } }, { message: 'm', content: 'c' }),
+    /no blob sha/,
+  );
+});
+
+test('planIndexWrite refuses a response with no status code at all', () => {
+  // That is what a node without fullResponse returns, and it would make a
+  // missing file indistinguishable from an existing one.
+  assert.throws(
+    () => planIndexWrite({ sha: 'abc' }, { message: 'm', content: 'c' }),
+    /no statusCode[\s\S]*fullResponse/,
+  );
+  assert.throws(() => planIndexWrite(undefined, { message: 'm', content: 'c' }), /no statusCode/);
+});
+
+test('"Read index.html sha" tolerates the first-run 404 and keeps the status code', () => {
+  const node = nodeNamed(buildReportWorkflow(), 'Read index.html sha');
+  assert.equal(node.parameters.method, 'GET');
+  assert.equal(node.parameters.url, 'https://api.github.com/repos/skomp/n8n-reports/contents/index.html');
+  const response = node.parameters.options.response.response;
+  assert.equal(response.neverError, true, 'a 404 on run one must not fail the workflow');
+  assert.equal(response.fullResponse, true, 'without the status code a 404 is indistinguishable from a 200');
+});
+
+// --- The report workflow publishes three files ------------------------------
+
+test('buildReportPayload renders markdown and HTML from one rollup, plus the index path', () => {
+  const payload = buildReportPayload(fixtureText, '2026-09-06T00:00:00.000Z');
+  assert.equal(payload.path, 'reports/2026-09-06-triage.md');
+  assert.equal(payload.htmlPath, 'reports/2026-09-06-triage.html');
+  assert.equal(payload.indexPath, 'index.html');
+  // Value checks: the same population must appear in BOTH renderings.
+  assert.match(payload.content, /Population: \*\*13\*\*/);
+  assert.match(payload.htmlContent, /class="figure"><strong>13<\/strong>/);
+});
+
+test('both renderings are anchored to the SAME report timestamp', () => {
+  // One rollup, two renderings: if the HTML is rendered against a different
+  // `now` it silently publishes a different window from the markdown beside
+  // it. Checking the WINDOWED POPULATION, not just the printed date, is what
+  // catches the HTML being anchored somewhere else.
+  const early = buildReportPayload(fixtureText, '2026-05-01T00:00:00.000Z');
+  assert.match(early.content, /180 days since 2025-11-02/);
+  assert.match(early.htmlContent, /180 days since 2025-11-02/);
+  // 6 of the 13 fixture issues were created on or after 2025-11-02.
+  assert.match(early.content, /\*\*6\*\* of the 13 triaged issues/);
+  assert.match(early.htmlContent, /<strong>6<\/strong> of the 13 triaged issues/);
+  assert.match(early.htmlContent, /<title>n8n triage report — 2026-05-01<\/title>/);
+
+  const late = buildReportPayload(fixtureText, '2026-09-06T00:00:00.000Z');
+  assert.match(late.content, /\*\*0\*\* of the 13 triaged issues/);
+  assert.match(late.htmlContent, /<strong>0<\/strong> of the 13 triaged issues/);
+  assert.match(late.htmlContent, /<title>n8n triage report — 2026-09-06<\/title>/);
+});
+
+test('the report workflow writes the two dated files before index.html', () => {
+  // index.html is the pointer at the archive. If a dated write fails, the
+  // pointer must NOT already be advanced to a report that is not there.
+  const { connections } = buildReportWorkflow();
+  assert.deepEqual(connections['Plan index write'].main[0].map(c => c.node), ['Write report']);
+  assert.deepEqual(connections['Write report'].main[0].map(c => c.node), ['Write report HTML']);
+  assert.deepEqual(connections['Write report HTML'].main[0].map(c => c.node), ['Write index.html']);
+  assert.equal(connections['Write index.html'], undefined, 'index.html must be the last write');
+});
+
+test('only index.html sends a blob sha; the dated paths never do', () => {
+  const wf = buildReportWorkflow();
+  for (const name of ['Write report', 'Write report HTML']) {
+    const body = nodeNamed(wf, name).parameters.jsonBody;
+    assert.doesNotMatch(body, /sha/, `${name} must not send a sha — its path is unique per run`);
+  }
+  // index.html's body is built by the Code node, which decides about the sha.
+  assert.match(nodeNamed(wf, 'Write index.html').parameters.jsonBody, /Plan index write/);
+});
+
+test('the generated "Plan index write" node creates on run one and updates on run two', () => {
+  const jsCode = nodeNamed(buildReportWorkflow(), 'Plan index write').parameters.jsCode;
+  const rendered = {
+    path: 'reports/2026-09-06-triage.md',
+    content: b64('# md'),
+    htmlPath: 'reports/2026-09-06-triage.html',
+    htmlContent: b64('<!doctype html>'),
+    indexPath: 'index.html',
+  };
+  const run = response => {
+    const out = runCodeNode(jsCode, {
+      nodes: { 'Rollup and render': rendered, 'Read index.html sha': response },
+    });
+    assert.equal(out.length, 1);
+    return { body: JSON.parse(out[0].json.body), created: out[0].json.created };
+  };
+
+  const first = run({ statusCode: 404, body: { message: 'Not Found' } });
+  assert.equal(first.created, true);
+  assert.ok(!('sha' in first.body), 'the first run must create, without a sha');
+
+  const later = run({ statusCode: 200, body: { sha: '9a8b7c6d5e4f' } });
+  assert.equal(later.created, false);
+  assert.equal(later.body.sha, '9a8b7c6d5e4f');
+
+  // index.html is a COPY of the dated HTML, never a second rendering: the same
+  // base64 must appear in both writes.
+  assert.equal(first.body.content, rendered.htmlContent);
+  assert.equal(later.body.content, rendered.htmlContent);
+});
+
+test('the generated "Rollup and render" node emits all three files as ONE item', () => {
+  const jsCode = nodeNamed(buildReportWorkflow(), 'Rollup and render').parameters.jsCode;
+  const out = runCodeNode(jsCode, { items: [{ json: { data: fixtureText } }] });
+
+  assert.equal(out.length, 1, 'the report must never be emitted as one item per issue');
+  const j = out[0].json;
+  assert.match(j.path, /^reports\/\d{4}-\d{2}-\d{2}-triage\.md$/);
+  assert.match(j.htmlPath, /^reports\/\d{4}-\d{2}-\d{2}-triage\.html$/);
+  assert.equal(j.indexPath, 'index.html');
+  // Decoded VALUES, not the presence of a field.
+  const html = Buffer.from(j.htmlContent, 'base64').toString('utf8');
+  assert.match(html, /^<!doctype html>/);
+  assert.match(html, /class="figure"><strong>13<\/strong>/);
+  const md = Buffer.from(j.content, 'base64').toString('utf8');
+  assert.match(md, /Population: \*\*13\*\*/);
 });
 
 // --- The committed files ----------------------------------------------------

@@ -26,7 +26,7 @@
       "typeVersion": 4.5,
       "position": [
         220,
-        0
+        -140
       ],
       "parameters": {
         "method": "GET",
@@ -57,8 +57,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        440,
-        0
+        220,
+        140
       ],
       "parameters": {
         "method": "GET",
@@ -89,8 +89,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        660,
-        0
+        440,
+        140
       ],
       "parameters": {
         "method": "GET",
@@ -129,8 +129,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        880,
-        0
+        440,
+        -140
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
@@ -142,8 +142,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        1100,
-        0
+        660,
+        -140
       ],
       "parameters": {
         "method": "POST",
@@ -201,16 +201,33 @@
       "waitBetweenTries": 5000
     },
     {
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "mode": "chooseBranch",
+        "numberInputs": 2,
+        "chooseBranchMode": "waitForAll",
+        "output": "empty"
+      },
+      "notes": "Synchronisation barrier, not a data join. Input 1 is the GraphQL fetch (one item per page), input 2 is the store download (one item). chooseBranch / waitForAll holds until BOTH branches finish; output \"empty\" emits one empty item, so nothing is combined and the 2.86 MB store is not copied into this node's output. \"Upsert store\" reads every input by node name.",
+      "notesInFlow": false
+    },
+    {
       "name": "Upsert store",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1320,
+        1100,
         0
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "function parseStore(text) {\n  const map = new Map();\n  for (const line of text.split('\\n')) {\n    const trimmed = line.trim();\n    if (!trimmed) continue;\n    const issue = JSON.parse(trimmed);\n    map.set(issue.number, issue);\n  }\n  return map;\n}\n\nfunction serialiseStore(map) {\n  return [...map.values()]\n    .sort((a, b) => a.number - b.number)\n    .map(i => JSON.stringify(i))\n    .join('\\n') + '\\n';\n}\n\nfunction upsert(map, issues) {\n  for (const issue of issues) map.set(issue.number, issue);\n  return map;\n}\n\nfunction watermarkOf(map) {\n  let max = null;\n  for (const issue of map.values()) {\n    if (issue.updatedAt && (max === null || issue.updatedAt > max)) max = issue.updatedAt;\n  }\n  return max;\n}\n\n\nconst MIN_STORE_FRACTION = 0.9;\n\nfunction assertStoreIsIntact(store, state = {}) {\n  if (store.size === 0) {\n    throw new Error(\n      'refusing to write: the store read back EMPTY. GitHub\\'s Contents API returns HTTP 200 ' +\n      'with an empty content field for files over 1 MB — read issues.ndjson with ' +\n      'Accept: application/vnd.github.raw. Writing now would destroy the store.'\n    );\n  }\n  const expected = typeof state.records === 'number' ? state.records : null;\n  if (expected !== null && store.size < expected * MIN_STORE_FRACTION) {\n    throw new Error(\n      `refusing to write: the store read back ${store.size} record(s) but state.json records ` +\n      `${expected}. That is below ${MIN_STORE_FRACTION * 100}% of the expected count, so the read ` +\n      'was short. Writing now would shrink the store.'\n    );\n  }\n}\n\nfunction issuesFromPages(pages) {\n  const issues = [];\n  for (const [index, page] of pages.entries()) {\n    if (page?.errors) {\n      throw new Error(`GitHub GraphQL (page ${index + 1}): ${page.errors.map(e => e.message).join('; ')}`);\n    }\n    const nodes = page?.data?.repository?.issues?.nodes;\n    if (!Array.isArray(nodes)) {\n      throw new Error(\n        `GitHub GraphQL (page ${index + 1}): response carried no data.repository.issues.nodes — ` +\n        'refusing to build a store from an unrecognised response'\n      );\n    }\n    issues.push(...nodes);\n  }\n  return issues;\n}\n\nfunction applyPages({ storeText, stateText, pages }) {\n  const store = parseStore(storeText ?? '');\n  const state = stateText ? JSON.parse(stateText) : {};\n  // Before anything else, and before any HTTP write can be reached.\n  assertStoreIsIntact(store, state);\n\n  const issues = issuesFromPages(pages);\n  upsert(store, issues);\n  const watermark = watermarkOf(store);\n  // Merge, do not replace: state.json also carries `source` and\n  // `backfilledAt`, written by the backfill and not reproducible from here.\n  const nextState = { ...state, watermark, records: store.size };\n\n  return {\n    storeText: serialiseStore(store),\n    stateText: JSON.stringify(nextState, null, 2) + '\\n',\n    fetched: issues.length,\n    records: store.size,\n    watermark,\n  };\n}\n\n// --- n8n driver ---------------------------------------------------------\n// CRITICAL MEMORY CONSTRAINT (spec section 5): this node holds the store as a\n// single TEXT string and returns ONE item. Do NOT change it to emit one item\n// per issue. n8n holds every node's output array in memory for the whole\n// execution; the store holds 5,464+ issues, and one item per issue is the\n// exact out-of-memory failure this project exists to avoid.\n//\n// Input is one item per GraphQL page from \"Fetch issues\". The store and the\n// state are read from their own nodes by name so the page count never\n// multiplies them.\nconst pages = $input.all().map(item => item.json);\nconst storeText = $('Read issues.ndjson').first().json.data;\nconst stateText = Buffer.from($('Read state.json').first().json.content ?? '', 'base64').toString('utf8');\n\n// applyPages() throws BEFORE producing any write payload if the store read\n// back empty or short — see assertStoreIsIntact above. Do not catch it: a\n// failed run is recoverable, an overwritten store is not.\nconst result = applyPages({ storeText, stateText, pages });\n\nreturn [{\n  json: {\n    storeContent: Buffer.from(result.storeText, 'utf8').toString('base64'),\n    // The blob sha changes on every write, so it is re-read each run and\n    // never cached.\n    storeSha: $('Read issues.ndjson sha').first().json.sha,\n    stateContent: Buffer.from(result.stateText, 'utf8').toString('base64'),\n    stateSha: $('Read state.json').first().json.sha,\n    fetched: result.fetched,\n    records: result.records,\n    watermark: result.watermark,\n  },\n}];"
+        "jsCode": "function parseStore(text) {\n  const map = new Map();\n  for (const line of text.split('\\n')) {\n    const trimmed = line.trim();\n    if (!trimmed) continue;\n    const issue = JSON.parse(trimmed);\n    map.set(issue.number, issue);\n  }\n  return map;\n}\n\nfunction serialiseStore(map) {\n  return [...map.values()]\n    .sort((a, b) => a.number - b.number)\n    .map(i => JSON.stringify(i))\n    .join('\\n') + '\\n';\n}\n\nfunction upsert(map, issues) {\n  for (const issue of issues) map.set(issue.number, issue);\n  return map;\n}\n\nfunction watermarkOf(map) {\n  let max = null;\n  for (const issue of map.values()) {\n    if (issue.updatedAt && (max === null || issue.updatedAt > max)) max = issue.updatedAt;\n  }\n  return max;\n}\n\n\nconst MIN_STORE_FRACTION = 0.9;\n\nfunction assertStoreIsIntact(store, state = {}) {\n  if (store.size === 0) {\n    throw new Error(\n      'refusing to write: the store read back EMPTY. GitHub\\'s Contents API returns HTTP 200 ' +\n      'with an empty content field for files over 1 MB — read issues.ndjson with ' +\n      'Accept: application/vnd.github.raw. Writing now would destroy the store.'\n    );\n  }\n  const expected = typeof state.records === 'number' ? state.records : null;\n  if (expected !== null && store.size < expected * MIN_STORE_FRACTION) {\n    throw new Error(\n      `refusing to write: the store read back ${store.size} record(s) but state.json records ` +\n      `${expected}. That is below ${MIN_STORE_FRACTION * 100}% of the expected count, so the read ` +\n      'was short. Writing now would shrink the store.'\n    );\n  }\n}\n\nfunction issuesFromPages(pages) {\n  const issues = [];\n  for (const [index, page] of pages.entries()) {\n    if (page?.errors) {\n      throw new Error(`GitHub GraphQL (page ${index + 1}): ${page.errors.map(e => e.message).join('; ')}`);\n    }\n    const nodes = page?.data?.repository?.issues?.nodes;\n    if (!Array.isArray(nodes)) {\n      throw new Error(\n        `GitHub GraphQL (page ${index + 1}): response carried no data.repository.issues.nodes — ` +\n        'refusing to build a store from an unrecognised response'\n      );\n    }\n    issues.push(...nodes);\n  }\n  return issues;\n}\n\nfunction applyPages({ storeText, stateText, pages }) {\n  const store = parseStore(storeText ?? '');\n  const state = stateText ? JSON.parse(stateText) : {};\n  // Before anything else, and before any HTTP write can be reached.\n  assertStoreIsIntact(store, state);\n\n  const issues = issuesFromPages(pages);\n  upsert(store, issues);\n  const watermark = watermarkOf(store);\n  // Merge, do not replace: state.json also carries `source` and\n  // `backfilledAt`, written by the backfill and not reproducible from here.\n  const nextState = { ...state, watermark, records: store.size };\n\n  return {\n    storeText: serialiseStore(store),\n    stateText: JSON.stringify(nextState, null, 2) + '\\n',\n    fetched: issues.length,\n    records: store.size,\n    watermark,\n  };\n}\n\n// --- n8n driver ---------------------------------------------------------\n// CRITICAL MEMORY CONSTRAINT (spec section 5): this node holds the store as a\n// single TEXT string and returns ONE item. Do NOT change it to emit one item\n// per issue. n8n holds every node's output array in memory for the whole\n// execution; the store holds 5,464+ issues, and one item per issue is the\n// exact out-of-memory failure this project exists to avoid.\n//\n// This node sits behind a Merge barrier that joins two CONCURRENT branches —\n// the GraphQL fetch and the 2.86 MB store download — so its own $input is a\n// single empty item and carries nothing. Every input is therefore read by node\n// NAME, which also means the page count never multiplies the store or the\n// state: \"Fetch issues\" emits one item per GraphQL page, and .all() collects\n// them into one array held by this node alone.\n//\n// $('Read state.json') is on the OTHER branch now. Naming it explicitly is\n// what keeps the truncation guard's \"records\" count reachable from here.\nconst pages = $('Fetch issues').all().map(item => item.json);\nconst storeText = $('Read issues.ndjson').first().json.data;\nconst stateText = Buffer.from($('Read state.json').first().json.content ?? '', 'base64').toString('utf8');\n\n// applyPages() throws BEFORE producing any write payload if the store read\n// back empty or short — see assertStoreIsIntact above. Do not catch it: a\n// failed run is recoverable, an overwritten store is not.\nconst result = applyPages({ storeText, stateText, pages });\n\nreturn [{\n  json: {\n    storeContent: Buffer.from(result.storeText, 'utf8').toString('base64'),\n    // The blob sha changes on every write, so it is re-read each run and\n    // never cached.\n    storeSha: $('Read issues.ndjson sha').first().json.sha,\n    stateContent: Buffer.from(result.stateText, 'utf8').toString('base64'),\n    stateSha: $('Read state.json').first().json.sha,\n    fetched: result.fetched,\n    records: result.records,\n    watermark: result.watermark,\n  },\n}];"
       }
     },
     {
@@ -218,7 +235,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        1540,
+        1320,
         0
       ],
       "parameters": {
@@ -251,7 +268,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        1760,
+        1540,
         0
       ],
       "parameters": {
@@ -290,13 +307,7 @@
             "node": "Read state.json",
             "type": "main",
             "index": 0
-          }
-        ]
-      ]
-    },
-    "Read state.json": {
-      "main": [
-        [
+          },
           {
             "node": "Read issues.ndjson sha",
             "type": "main",
@@ -305,18 +316,7 @@
         ]
       ]
     },
-    "Read issues.ndjson sha": {
-      "main": [
-        [
-          {
-            "node": "Read issues.ndjson",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Read issues.ndjson": {
+    "Read state.json": {
       "main": [
         [
           {
@@ -338,7 +338,40 @@
         ]
       ]
     },
+    "Read issues.ndjson sha": {
+      "main": [
+        [
+          {
+            "node": "Read issues.ndjson",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Fetch issues": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read issues.ndjson": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
       "main": [
         [
           {

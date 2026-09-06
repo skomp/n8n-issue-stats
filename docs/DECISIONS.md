@@ -112,6 +112,8 @@ at 1,000 results, which is below our population.
    ~7.1 KB for REST).
 7. **Storage**: NDJSON in `skomp/n8n-data`.
 8. **Output**: dated markdown report committed to `skomp/n8n-reports`.
+   Extended 2026-09-06: the same run also publishes a styled, self-contained HTML
+   twin at the dated path, and copies it to `index.html` for GitHub Pages.
 
 ## Consequence: the memory problem is largely designed away
 
@@ -145,3 +147,32 @@ of accepted work, so component grouping applies to the accepted segment only.
 
 - [ ] Which n8n Cloud plan is `skomp` on? Does not block implementation.
 - [ ] Report cadence — weekly assumed, needs confirming.
+
+## Later decisions
+
+**Ingest runs two branches concurrently (2026-09-06).** The GraphQL fetch and
+the 2.9 MB store download share no data — the query needs only the watermark
+from `state.json` — so a strictly linear chain made each wait on the other for
+no reason. They now run in parallel behind a Merge node in `chooseBranch` /
+`waitForAll` mode with `output: "empty"`.
+
+The Merge is a **barrier, not a join**. `Fetch issues` emits one item per
+GraphQL page while the store branch emits one, so `combineAll` would produce an
+N x 1 cartesian output and `combineByPosition` would drop every page after the
+first. `output: "empty"` emits a single empty item — verified in n8n's own
+source, `nodes/Merge/v3/actions/mode/chooseBranch.ts`, which pushes one object
+rather than returning an empty array, so the downstream node still runs. It also
+keeps the 2.9 MB store out of a second node's saved output. `Upsert store`
+therefore reads all four of its inputs by node name.
+
+`useDataOfInput` is **1-based** (n8n resolves it as `inputsData[n - 1]`) while a
+connection's `index` is **0-based**. `output: "empty"` uses neither, which is
+one fewer off-by-one to get wrong.
+
+**`index.html` is the only write that needs a blob sha (2026-09-06).** The two
+dated paths are unique per run, so the Contents API creates them outright.
+`index.html` is overwritten weekly and returns 404 on the first run, so the sha
+read runs with `neverError` and `fullResponse`, and `planIndexWrite()` sends the
+sha only when the read returned one. Any status other than 2xx or 404 throws
+rather than guessing: a PUT with no sha over an existing file fails with an
+opaque 422, which is a much worse place to discover a transient 500.

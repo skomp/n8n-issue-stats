@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { rollup } from '../src/lib/rollup.js';
-import { renderReport, reportPath } from '../src/lib/report.js';
+import { renderReport, renderHtml, reportPath, reportHtmlPath, INDEX_PATH } from '../src/lib/report.js';
 import { parseStore, serialiseStore, upsert, watermarkOf } from '../src/lib/store.js';
 import { ISSUES_QUERY } from '../src/lib/github.js';
 import { ALL_FILTER_LABELS } from '../src/lib/labels.js';
@@ -356,6 +356,13 @@ export function applyPages({ storeText, stateText, pages }) {
 // returns exactly one item holding its result. Do not "helpfully" change
 // either side of that contract to emit one item per issue.
 
+// Renders BOTH publications from ONE rollup. The markdown and the HTML are two
+// views of the same numbers by construction, so they cannot disagree.
+//
+// `htmlContent` is published twice per run, unchanged: once at the dated
+// archive path and once as index.html. There is deliberately no second
+// rendering for the index — "the index is a copy of the latest report" is
+// enforced here, by there being only one string.
 export function buildReportPayload(storeText, generatedAtISO) {
   const store = parseStore(storeText);
   // The report does not write the store, but publishing "Population: 0" from
@@ -366,9 +373,62 @@ export function buildReportPayload(storeText, generatedAtISO) {
   // intake window is computed from it, and leaving it to Date.now() makes the
   // report non-deterministic and untestable.
   const r = rollup(issues, { now: new Date(generatedAtISO) });
-  const content = renderReport(r, { generatedAt: generatedAtISO });
-  const path = reportPath(new Date(generatedAtISO));
-  return { path, content };
+  const generatedAt = new Date(generatedAtISO);
+  return {
+    path: reportPath(generatedAt),
+    content: renderReport(r, { generatedAt: generatedAtISO }),
+    htmlPath: reportHtmlPath(generatedAt),
+    htmlContent: renderHtml(r, { generatedAt: generatedAtISO }),
+    indexPath: INDEX_PATH,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// index.html: the one write that needs a blob sha, and cannot always have one
+// ---------------------------------------------------------------------------
+//
+// The two dated files are written to a path that is unique per run, so GitHub's
+// Contents API creates them and no sha is involved. index.html is OVERWRITTEN
+// every run, and the API refuses a PUT over an existing file without the
+// current blob sha (422). So the sha has to be read first — except on the very
+// first run, when index.html does not exist yet and the read is a 404.
+//
+// "Read index.html sha" therefore runs with neverError so the 404 does not fail
+// the run, and fullResponse so the status code survives to here. This function
+// is the whole decision, and it is deliberately strict about which statuses it
+// will interpret:
+//
+//   404          -> the file does not exist. Create it, send NO sha.
+//   2xx + sha    -> the file exists. Overwrite it, send the sha.
+//   anything else-> throw. A 500 or a 403 says nothing about whether
+//                   index.html exists, and guessing "no sha" there turns a
+//                   transient upstream failure into a confusing 422 on the
+//                   write. Fail on the read instead, where the cause is legible.
+export function planIndexWrite(response, { message, content }) {
+  const status = response?.statusCode;
+  if (typeof status !== 'number') {
+    throw new Error(
+      'Read index.html sha: the response carried no statusCode. The node must set both ' +
+      'fullResponse and neverError, or a missing file cannot be told apart from an existing one.'
+    );
+  }
+  if (status === 404) return { message, content };
+
+  if (status < 200 || status >= 300) {
+    throw new Error(
+      `Read index.html sha: HTTP ${status}. Only 404 means "index.html does not exist yet"; ` +
+      'refusing to guess, because a PUT with no sha over an existing file fails with 422.'
+    );
+  }
+
+  const sha = response?.body?.sha;
+  if (typeof sha !== 'string' || sha === '') {
+    throw new Error(
+      `Read index.html sha: HTTP ${status} but the response body carried no blob sha. ` +
+      'Writing without one would fail with 422.'
+    );
+  }
+  return { message, content, sha };
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +440,7 @@ export const NODE_TYPE_VERSIONS = {
   'n8n-nodes-base.scheduleTrigger': 1.4,
   'n8n-nodes-base.httpRequest': 4.5,
   'n8n-nodes-base.code': 2,
+  'n8n-nodes-base.merge': 3.2,
 };
 
 // ---------------------------------------------------------------------------
@@ -467,6 +528,46 @@ function codeNode({ name, position, jsCode }) {
   };
 }
 
+// A SYNCHRONISATION BARRIER, not a data join.
+//
+// mode "chooseBranch" with chooseBranchMode "waitForAll" is the only Merge mode
+// that waits for every input without combining anything. The combine modes are
+// all wrong here: "Fetch issues" emits ONE ITEM PER GRAPHQL PAGE while the
+// store branch emits exactly one, so combineAll would produce a cartesian
+// N x 1 output and combineByPosition would silently drop every page after the
+// first.
+//
+// output: 'empty' emits exactly ONE item, `{ json: {} }` — verified in n8n's
+// own source, packages/nodes-base/nodes/Merge/v3/actions/mode/chooseBranch.ts,
+// which pushes a single object rather than returning an empty array. That
+// matters: a node that emitted NO items would leave "Upsert store" with no
+// input. One empty item is exactly enough to trigger the downstream node and
+// nothing more, so the 2.86 MB store is not copied into a second node's output
+// (n8n keeps every node's output for the whole execution and saves it with the
+// execution record). "Upsert store" reads all four of its inputs by node name
+// instead, which is uniform and does not depend on which branch this forwards.
+//
+// numberInputs is 1-BASED in the UI ("Input 1", "Input 2") and so is
+// useDataOfInput, which n8n resolves as inputsData[useDataOfInput - 1]. The
+// `index` on a connection is 0-BASED. output: 'empty' uses neither, which is
+// one fewer off-by-one to get wrong.
+function mergeBarrierNode({ name, position, notes }) {
+  return {
+    name,
+    type: 'n8n-nodes-base.merge',
+    typeVersion: NODE_TYPE_VERSIONS['n8n-nodes-base.merge'],
+    position,
+    parameters: {
+      mode: 'chooseBranch',
+      numberInputs: 2,
+      chooseBranchMode: 'waitForAll',
+      output: 'empty',
+    },
+    notes,
+    notesInFlow: false,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Generated Code-node bodies
 // ---------------------------------------------------------------------------
@@ -522,10 +623,16 @@ function buildUpsertCode() {
 // execution; the store holds 5,464+ issues, and one item per issue is the
 // exact out-of-memory failure this project exists to avoid.
 //
-// Input is one item per GraphQL page from "Fetch issues". The store and the
-// state are read from their own nodes by name so the page count never
-// multiplies them.
-const pages = $input.all().map(item => item.json);
+// This node sits behind a Merge barrier that joins two CONCURRENT branches —
+// the GraphQL fetch and the 2.86 MB store download — so its own $input is a
+// single empty item and carries nothing. Every input is therefore read by node
+// NAME, which also means the page count never multiplies the store or the
+// state: "Fetch issues" emits one item per GraphQL page, and .all() collects
+// them into one array held by this node alone.
+//
+// $('Read state.json') is on the OTHER branch now. Naming it explicitly is
+// what keeps the truncation guard's "records" count reachable from here.
+const pages = $('Fetch issues').all().map(item => item.json);
 const storeText = $('Read issues.ndjson').first().json.data;
 const stateText = Buffer.from($('Read state.json').first().json.content ?? '', 'base64').toString('utf8');
 
@@ -590,15 +697,48 @@ const generatedAt = new Date().toISOString();
 // rather than to wall-clock time read somewhere deeper.
 const payload = buildReportPayload(storeText, generatedAt);
 
+// Three files per run, from ONE render. The two dated paths are unique per
+// run and are created outright; index.html is the same HTML bytes republished
+// at the site root, and is the only one that needs a blob sha.
 return [{
   json: {
     path: payload.path,
     content: Buffer.from(payload.content, 'utf8').toString('base64'),
+    htmlPath: payload.htmlPath,
+    htmlContent: Buffer.from(payload.htmlContent, 'utf8').toString('base64'),
+    indexPath: payload.indexPath,
   },
 }];
 `.trim();
 
   return [lib, helpers, driver].join('\n\n');
+}
+
+function buildPlanIndexWriteCode() {
+  const helpers = planIndexWrite.toString();
+
+  const driver = `
+// --- n8n driver ---------------------------------------------------------
+// ONE item in, ONE item out. Pure logic: it decides whether the index.html
+// PUT carries a blob sha, from the status code of the read before it.
+//
+// index.html does not exist on the first run, so that read is a 404 and must
+// not fail the workflow -- "Read index.html sha" sets neverError for exactly
+// that, and fullResponse so the status code reaches this node at all.
+const payload = $('Rollup and render').first().json;
+const response = $('Read index.html sha').first().json;
+
+const body = planIndexWrite(response, {
+  message: 'report: publish ' + payload.htmlPath + ' as ' + payload.indexPath,
+  // The SAME base64 the dated .html write uses. index.html is a copy of the
+  // latest report, never a second rendering of it.
+  content: payload.htmlContent,
+});
+
+return [{ json: { body: JSON.stringify(body), created: body.sha === undefined } }];
+`.trim();
+
+  return [helpers, driver].join('\n\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -658,14 +798,14 @@ export function buildIngestWorkflow() {
     },
     httpRequestNode({
       name: 'Read state.json',
-      position: [220, 0],
+      position: [220, -140],
       method: 'GET',
       url: `${GITHUB_API}/repos/${DATA_REPO}/contents/state.json`,
       notes: 'state.json is 136 bytes, so the JSON envelope returns its content and blob sha intact.',
     }),
     httpRequestNode({
       name: 'Read issues.ndjson sha',
-      position: [440, 0],
+      position: [220, 140],
       method: 'GET',
       url: `${GITHUB_API}/repos/${DATA_REPO}/contents/issues.ndjson`,
       notes:
@@ -673,11 +813,11 @@ export function buildIngestWorkflow() {
         're-fetched every run and never cached. The content field of this response is EMPTY ' +
         '(the file is over 1 MB) and must not be used — "Read issues.ndjson" fetches the bytes.',
     }),
-    rawReadNode({ name: 'Read issues.ndjson', position: [660, 0], path: 'issues.ndjson' }),
-    codeNode({ name: 'Plan fetch', position: [880, 0], jsCode: buildPlanFetchCode() }),
+    rawReadNode({ name: 'Read issues.ndjson', position: [440, 140], path: 'issues.ndjson' }),
+    codeNode({ name: 'Plan fetch', position: [440, -140], jsCode: buildPlanFetchCode() }),
     httpRequestNode({
       name: 'Fetch issues',
-      position: [1100, 0],
+      position: [660, -140],
       method: 'POST',
       url: GITHUB_GRAPHQL,
       accept: 'application/json',
@@ -689,17 +829,26 @@ export function buildIngestWorkflow() {
         'the node\'s built-in cursor pagination over the GraphQL endCursor.',
       retry: { retryOnFail: true, maxTries: 3, waitBetweenTries: 5000 },
     }),
-    codeNode({ name: 'Upsert store', position: [1320, 0], jsCode: buildUpsertCode() }),
+    mergeBarrierNode({
+      name: 'Merge',
+      position: [880, 0],
+      notes:
+        'Synchronisation barrier, not a data join. Input 1 is the GraphQL fetch (one item per page), ' +
+        'input 2 is the store download (one item). chooseBranch / waitForAll holds until BOTH branches ' +
+        'finish; output "empty" emits one empty item, so nothing is combined and the 2.86 MB store is ' +
+        'not copied into this node\'s output. "Upsert store" reads every input by node name.',
+    }),
+    codeNode({ name: 'Upsert store', position: [1100, 0], jsCode: buildUpsertCode() }),
     httpRequestNode({
       name: 'Write issues.ndjson',
-      position: [1540, 0],
+      position: [1320, 0],
       method: 'PUT',
       url: `${GITHUB_API}/repos/${DATA_REPO}/contents/issues.ndjson`,
       jsonBody: '={{ JSON.stringify({ "message": "sync: " + $json.fetched + " issue(s) fetched, " + $json.records + " stored", "content": $json.storeContent, "sha": $json.storeSha }) }}',
     }),
     httpRequestNode({
       name: 'Write state.json',
-      position: [1760, 0],
+      position: [1540, 0],
       method: 'PUT',
       url: `${GITHUB_API}/repos/${DATA_REPO}/contents/state.json`,
       jsonBody: '={{ JSON.stringify({ "message": "sync: watermark " + $(\'Upsert store\').first().json.watermark, "content": $(\'Upsert store\').first().json.stateContent, "sha": $(\'Upsert store\').first().json.stateSha }) }}',
@@ -710,15 +859,48 @@ export function buildIngestWorkflow() {
     }),
   ];
 
-  // One linear chain. Each node depends on the previous one having run: the
-  // Code nodes read earlier responses by node name, and the two writes are
-  // ordered store-then-watermark on purpose.
-  const chain = ['Daily', 'Read state.json', 'Read issues.ndjson sha', 'Read issues.ndjson',
-    'Plan fetch', 'Fetch issues', 'Upsert store', 'Write issues.ndjson', 'Write state.json'];
+  // TWO CONCURRENT BRANCHES, joined by a barrier.
+  //
+  //   Daily ─┬─→ Read state.json → Plan fetch → Fetch issues ──┬─→ Merge
+  //          └─→ Read issues.ndjson sha → Read issues.ndjson ──┘
+  //   Merge → Upsert store → Write issues.ndjson → Write state.json
+  //
+  // The two branches are genuinely independent: the GraphQL query needs only
+  // the watermark out of state.json, and the 2.86 MB store download needs
+  // nothing from the fetch. Running them in series made the slower of the two
+  // wait on the other for no reason.
+  //
+  // What is NOT independent, and is why the barrier exists: "Upsert store"
+  // must not run until BOTH have finished, because it reads all four upstream
+  // responses by node name.
+  //
+  // The tail stays strictly ordered. Write issues.ndjson runs before
+  // Write state.json so a failed store write leaves the watermark un-advanced
+  // and the next run re-fetches the same window; the reverse order would open
+  // a permanent gap.
+  const fetchBranch = ['Daily', 'Read state.json', 'Plan fetch', 'Fetch issues'];
+  const storeBranch = ['Daily', 'Read issues.ndjson sha', 'Read issues.ndjson'];
+  const tail = ['Merge', 'Upsert store', 'Write issues.ndjson', 'Write state.json'];
+
   const connections = {};
-  for (let i = 0; i < chain.length - 1; i += 1) {
-    connections[chain[i]] = { main: [[{ node: chain[i + 1], type: 'main', index: 0 }]] };
-  }
+  const connect = (from, to, index = 0) => {
+    connections[from] ??= { main: [[]] };
+    connections[from].main[0].push({ node: to, type: 'main', index });
+  };
+  const chainUp = names => {
+    for (let i = 0; i < names.length - 1; i += 1) connect(names[i], names[i + 1]);
+  };
+
+  // Order matters only for readability: "Daily" ends up with both branch heads
+  // in one output array, which is how n8n fans out.
+  chainUp(fetchBranch);
+  chainUp(storeBranch);
+  // Merge input INDEXES are 0-based on the wire; the UI labels them Input 1 and
+  // Input 2. Input 1 (index 0) is the fetch branch, input 2 (index 1) is the
+  // store branch.
+  connect('Fetch issues', 'Merge', 0);
+  connect('Read issues.ndjson', 'Merge', 1);
+  chainUp(tail);
 
   return {
     name: 'Triage analytics — ingest',
@@ -745,18 +927,65 @@ export function buildReportWorkflow() {
     rawReadNode({ name: 'Read issues.ndjson', position: [220, 0], path: 'issues.ndjson' }),
     codeNode({ name: 'Rollup and render', position: [440, 0], jsCode: buildReportCode() }),
     httpRequestNode({
-      name: 'Write report',
+      name: 'Read index.html sha',
       position: [660, 0],
+      method: 'GET',
+      url: `${GITHUB_API}/repos/${REPORTS_REPO}/contents/${INDEX_PATH}`,
+      options: {
+        response: {
+          response: {
+            // neverError: on the FIRST run index.html does not exist and this
+            // is a 404. That is a normal state, not a failure, so it must not
+            // stop the run. fullResponse: without the status code there is no
+            // way to tell "does not exist yet" from "exists but the body was
+            // not what we expected", and the two need opposite handling.
+            neverError: true,
+            fullResponse: true,
+          },
+        },
+      },
+      notes:
+        'Returns 404 on the first run, before index.html exists — neverError keeps that from failing ' +
+        'the workflow, and fullResponse preserves the status code so "Plan index write" can tell a ' +
+        'missing file from a present one. The blob sha changes on every write, so it is never cached.',
+    }),
+    codeNode({ name: 'Plan index write', position: [880, 0], jsCode: buildPlanIndexWriteCode() }),
+    httpRequestNode({
+      name: 'Write report',
+      position: [1100, 0],
       method: 'PUT',
-      url: `={{ "${GITHUB_API}/repos/${REPORTS_REPO}/contents/" + $json.path }}`,
-      jsonBody: '={{ JSON.stringify({ "message": "report: " + $json.path, "content": $json.content }) }}',
+      url: `={{ "${GITHUB_API}/repos/${REPORTS_REPO}/contents/" + $('Rollup and render').first().json.path }}`,
+      jsonBody: '={{ JSON.stringify({ "message": "report: " + $(\'Rollup and render\').first().json.path, "content": $(\'Rollup and render\').first().json.content }) }}',
       notes:
         'No sha is sent: the path carries the report date, so each weekly run creates a new file. ' +
         'A second run on the same day fails with 422 rather than overwriting — intended.',
     }),
+    httpRequestNode({
+      name: 'Write report HTML',
+      position: [1320, 0],
+      method: 'PUT',
+      url: `={{ "${GITHUB_API}/repos/${REPORTS_REPO}/contents/" + $('Rollup and render').first().json.htmlPath }}`,
+      jsonBody: '={{ JSON.stringify({ "message": "report: " + $(\'Rollup and render\').first().json.htmlPath, "content": $(\'Rollup and render\').first().json.htmlContent }) }}',
+      notes:
+        'The styled HTML twin of the markdown report, at the same dated path. Like the markdown it ' +
+        'needs no sha, because the date makes the path unique.',
+    }),
+    httpRequestNode({
+      name: 'Write index.html',
+      position: [1540, 0],
+      method: 'PUT',
+      url: `${GITHUB_API}/repos/${REPORTS_REPO}/contents/${INDEX_PATH}`,
+      jsonBody: '={{ $(\'Plan index write\').first().json.body }}',
+      notes:
+        'The ONLY write that needs a blob sha, because it overwrites the same path every week. ' +
+        '"Plan index write" includes the sha only when the read returned one, so the first run ' +
+        'creates the file and later runs update it. Runs LAST, deliberately: if a dated write fails, ' +
+        'index.html is not left pointing at a report that is missing from the archive.',
+    }),
   ];
 
-  const chain = ['Weekly', 'Read issues.ndjson', 'Rollup and render', 'Write report'];
+  const chain = ['Weekly', 'Read issues.ndjson', 'Rollup and render', 'Read index.html sha',
+    'Plan index write', 'Write report', 'Write report HTML', 'Write index.html'];
   const connections = {};
   for (let i = 0; i < chain.length - 1; i += 1) {
     connections[chain[i]] = { main: [[{ node: chain[i + 1], type: 'main', index: 0 }]] };

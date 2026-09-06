@@ -2,8 +2,9 @@
 
 Measures how `n8n-io/n8n` handles incoming issues: how many are accepted as real
 work, how many are bounced at triage and why, which components carry the load,
-and how long fixes actually take. Publishes a dated markdown report on a weekly
-schedule from n8n Cloud.
+and how long fixes actually take. Publishes a dated markdown report and a
+styled HTML page on a weekly schedule from n8n Cloud. The latest report is live
+at <https://skomp.github.io/n8n-reports/>.
 
 **The headline it produces:** of 5,464 triaged issues, **54% are rejected at
 triage** — and 2,336 of them (43% of the whole population) were closed as
@@ -15,7 +16,7 @@ should never have entered the bug tracker.
 ## Quick start
 
 ```bash
-npm test                                        # 101 tests, zero dependencies
+npm test                                        # 167 tests, zero dependencies
 GITHUB_TOKEN=$(gh auth token) npm run backfill  # one-off, ~3.5 min, writes data/issues.ndjson
 ```
 
@@ -55,19 +56,64 @@ item is fine; 5,464 items are not.
 |---|---|
 | `skomp/n8n-test` (this) | Library, CLIs, workflow generator, deploy script |
 | `skomp/n8n-data` | `issues.ndjson` (5,464 records, 2.9 MB) and `state.json` (sync watermark) |
-| `skomp/n8n-reports` | `reports/YYYY-MM-DD-triage.md` |
+| `skomp/n8n-reports` | `reports/YYYY-MM-DD-triage.{md,html}` and `index.html` (GitHub Pages) |
 
 ```
                     ┌─ local, once ────────────────────────────┐
 GitHub GraphQL ────►│ src/backfill.js → data/issues.ndjson     │──► skomp/n8n-data
                     └──────────────────────────────────────────┘
                     ┌─ n8n Cloud, daily ───────────────────────┐
-GitHub GraphQL ────►│ HTTP Request (paginated) → Code (upsert) │──► skomp/n8n-data
+GitHub GraphQL ────►│ HTTP Request (paginated) ─┐              │
+                    │                     Merge ├─► Code       │──► skomp/n8n-data
+skomp/n8n-data ────►│ HTTP Request (store read) ┘   (upsert)   │
                     └──────────────────────────────────────────┘
                     ┌─ n8n Cloud, weekly ──────────────────────┐
 skomp/n8n-data ────►│ HTTP Request → Code (rollup + render)    │──► skomp/n8n-reports
                     └──────────────────────────────────────────┘
 ```
+
+### The ingest workflow runs two branches at once
+
+```
+Daily ─┬─► Read state.json ────────► Plan fetch ─► Fetch issues ─┬─► Merge
+       └─► Read issues.ndjson sha ─► Read issues.ndjson ─────────┘
+                                     Merge ─► Upsert store ─► Write issues.ndjson ─► Write state.json
+```
+
+The GraphQL fetch and the 2.9 MB store download are independent — the query
+needs only the watermark out of `state.json` — so they run concurrently. The
+**Merge node (`chooseBranch` / `waitForAll`, typeVersion 3.2) is a
+synchronisation barrier, not a data join.** `Fetch issues` emits one item per
+GraphQL page and the store branch emits one, so any combine mode would produce
+an N x 1 cartesian output; `output: "empty"` emits a single empty item instead,
+and `Upsert store` reads all four upstream responses by node name. The tail
+stays strictly ordered: the store is written before the watermark, so a failed
+store write leaves the next run re-fetching the same window instead of skipping
+it.
+
+### The report workflow publishes three files
+
+| Path | Content | Blob sha |
+|---|---|---|
+| `reports/YYYY-MM-DD-triage.md` | markdown | not needed — the dated path is unique |
+| `reports/YYYY-MM-DD-triage.html` | the same numbers, as a styled page | not needed — same reason |
+| `index.html` | a byte-for-byte copy of the latest HTML | **required from run two onward** |
+
+`index.html` is overwritten every week, and GitHub's Contents API refuses a PUT
+over an existing file without the current blob sha — but returns **404 on the
+first run**, before the file exists. `Read index.html sha` therefore sets
+`neverError` (so the 404 does not fail the run) and `fullResponse` (so the
+status code survives), and `planIndexWrite()` includes the sha only when the
+read actually returned one. It refuses to guess on any other status: a 500 says
+nothing about whether `index.html` exists, and treating it as "absent" would
+turn a transient failure into an opaque 422 on the write.
+
+The HTML is **self-contained** — one inline `<style>` block, no external
+stylesheet, script or web font — so it renders identically from GitHub Pages and
+from a `file://` URL. Its palette is defined as tokens on bare `:root` with only
+the tokens redefined under `prefers-color-scheme: dark`. Every interpolated
+value is escaped: component names are GitHub label names, chosen outside this
+repo.
 
 `build/build-workflows.js` generates the two workflows by inlining `src/lib/*`
 source into their Code nodes, so **the deployed logic cannot drift from the
@@ -82,7 +128,7 @@ src/lib/classify.js   segmentOf() and componentOf()
 src/lib/metrics.js    Lead times, median, p90
 src/lib/store.js      NDJSON parse/serialise/upsert
 src/lib/rollup.js     Aggregation
-src/lib/report.js     Markdown rendering
+src/lib/report.js     Markdown and HTML rendering
 src/backfill.js       One-off historical load (local)
 src/sync.js           Incremental sync with watermark
 build/                Workflow generator
@@ -121,7 +167,7 @@ population}` so every table can print the denominator it actually used.
 
 ## What the tests are for
 
-101 tests, and the number is not the point. Partway through, a mutation review
+167 tests, and the number is not the point. Partway through, a mutation review
 seeded 17 deliberate bugs into a suite of 42 passing tests. **14 of them
 survived with the suite fully green** — including deleting the `mergedAt`
 filter, the single most load-bearing rule in the codebase.
@@ -167,8 +213,8 @@ claude mcp add --transport http n8n https://<instance>.app.n8n.cloud/mcp-server/
 ```
 
 Node type versions are read from the live instance rather than assumed —
-`scheduleTrigger` 1.4, `httpRequest` 4.5, `code` 2. All three initial guesses
-were wrong, two of them silently.
+`scheduleTrigger` 1.4, `httpRequest` 4.5, `code` 2, `merge` 3.2. All three
+initial guesses were wrong, two of them silently.
 
 ## Limits worth stating plainly
 
@@ -179,6 +225,8 @@ were wrong, two of them silently.
   4.7% within the last 180 days. Reported as `unclassified` either way.
 - **Fix lead time covers 543 issues**, not 5,464 — only those with a linked PR
   that actually merged.
+- **`index.html` always shows the most recent run.** Older reports are reachable
+  from the link in its footer, or by their dated path under `reports/`.
 - **The backfill sometimes trips GitHub's secondary rate limit** around page 20
   of 55. A five-minute cooldown clears it, and the CLI only writes on full
   completion so retrying is safe.

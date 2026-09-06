@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { rollup } from '../src/lib/rollup.js';
-import { renderReport, reportPath } from '../src/lib/report.js';
+import {
+  renderReport, renderHtml, reportPath, reportHtmlPath,
+  escapeHtml, INDEX_PATH, ARCHIVE_URL, CAVEAT_COUNT,
+} from '../src/lib/report.js';
 
 const issues = readFileSync('tests/fixtures/issues.sample.ndjson', 'utf8')
   .trim().split('\n').map(JSON.parse);
@@ -195,4 +198,273 @@ test('the Linear caveat is stated so nobody reads this as delivery data', () => 
 
 test('rendering is deterministic for a fixed input', () => {
   assert.equal(md, renderReport(rollup(issues, WINDOW), { generatedAt: '2026-09-06T10:00:00Z' }));
+});
+
+// ---------------------------------------------------------------------------
+// The HTML report
+// ---------------------------------------------------------------------------
+//
+// An HTML renderer is exceptionally easy to test uselessly: `html.includes(
+// '<table>')` passes against a page whose every cell is empty, and
+// `includes('5464')` passes against a page that prints the number once in a
+// caption and nowhere in the data. So every assertion below is anchored to a
+// COMPLETE rendered row, a specific cell, or a decoded value — the same rule
+// the markdown tests above follow.
+
+const html = renderHtml(r, { generatedAt: '2026-09-06T10:00:00Z' });
+
+// The <style> block, isolated. Several tests reason about the CSS alone.
+const styleBlock = html.split('<style>')[1].split('</style>')[0];
+// Everything except the CSS, for tests that must not be satisfied by a colour
+// or a property name that happens to appear in the stylesheet.
+const htmlBody = html.split('</style>')[1];
+
+const htmlSection = heading => {
+  const body = html.split(`<h2>${heading}</h2>`)[1];
+  assert.ok(body, `missing HTML section: ${heading}`);
+  return body.split('<h2>')[0];
+};
+
+test('the HTML path is dated, and sits beside the markdown', () => {
+  assert.equal(reportHtmlPath(new Date('2026-09-06T10:00:00Z')), 'reports/2026-09-06-triage.html');
+  assert.equal(INDEX_PATH, 'index.html');
+});
+
+test('the HTML is a complete document with a title naming the report date', () => {
+  assert.match(html, /^<!doctype html>\n<html lang="en">/);
+  assert.match(html, /<meta charset="utf-8">/);
+  assert.match(html, /<meta name="viewport" content="width=device-width, initial-scale=1">/);
+  assert.match(html, /<title>n8n triage report — 2026-09-06<\/title>/);
+  assert.match(html, /<\/html>\n$/);
+});
+
+// --- The numbers, cell by cell ----------------------------------------------
+
+test('the HTML prints the population and the window population as figures', () => {
+  assert.match(html, /<span class="figure"><strong>13<\/strong><\/span> triaged issues from <code>n8n-io\/n8n<\/code>/);
+  // Emptying the store must change the rendered page, not just the title.
+  const empty = renderHtml(rollup([], WINDOW), { generatedAt: '2026-09-06T10:00:00Z' });
+  assert.match(empty, /<span class="figure"><strong>0<\/strong><\/span> triaged issues/);
+  assert.notEqual(html, empty);
+});
+
+test('the HTML carries the two-population explanation with both denominators', () => {
+  assert.match(html, /<strong>This report uses two denominators, deliberately\.<\/strong>/);
+  assert.match(html, /cover the <strong>440 days since 2025-06-23<\/strong> — <strong>11<\/strong> of the 13 triaged issues/);
+  assert.match(html, /<strong>lead times cover all history<\/strong>, all 13 issues/);
+});
+
+test('the HTML headline states the ratio and both should-not-have-been-filed figures', () => {
+  const headline = htmlSection('Headline');
+  assert.match(headline, /In the 440 days since 2025-06-23: <strong>9 accepted<\/strong> to <strong>2 rejected<\/strong>/);
+  assert.match(headline, /ratio of <strong>4\.50<\/strong> accepted issues per rejected issue, out of 11 issues created in the window/);
+  assert.match(headline, /<strong>1<\/strong> issue \(<strong>9%<\/strong> of 11\) should never have been filed/);
+  assert.match(headline, /Over all history the figure is <strong>1<\/strong> of 13 \(<strong>8%<\/strong>\)/);
+});
+
+test('HTML intake rows carry their counts and shares in the right cells', () => {
+  assert.match(html, /<tr><td>Accepted<\/td><td class="num">9<\/td><td class="num">82%<\/td><\/tr>/);
+  assert.match(html, /<tr><td>Rejected at triage<\/td><td class="num">2<\/td><td class="num">18%<\/td><\/tr>/);
+  assert.match(htmlSection('Intake and outcome'), /Denominator: the <strong>11<\/strong> issues created in the window\./);
+});
+
+test('HTML rejection reasons render one row per reason, with the denominator', () => {
+  const reasons = htmlSection('Rejection reasons');
+  assert.match(reasons, /<tr><td>closed:incomplete-template<\/td><td class="num">1<\/td><td class="num">50%<\/td><\/tr>/);
+  assert.match(reasons, /<tr><td>closed:enhancement\/feature<\/td><td class="num">1<\/td><td class="num">50%<\/td><\/tr>/);
+  assert.equal([...reasons.matchAll(/<tr><td>/g)].length, 2);
+  assert.match(reasons, /Denominator: the <strong>2<\/strong> issues rejected in the window\./);
+});
+
+test('HTML component rows carry their counts, including unclassified', () => {
+  const component = htmlSection('Component');
+  assert.match(component, /<tr><td>unclassified<\/td><td class="num">4<\/td><\/tr>/);
+  assert.match(component, /<tr><td>packages\/nodes-base<\/td><td class="num">3<\/td><\/tr>/);
+  assert.match(component, /<tr><td>packages\/@n8n\/db<\/td><td class="num">1<\/td><\/tr>/);
+  assert.equal([...component.matchAll(/<tr><td>/g)].length, 4);
+  assert.match(component, /Component coverage: <strong>56%<\/strong> of 9 accepted issues\./);
+});
+
+test('the HTML triage funnel counts ISSUES in its denominator sentence, never labels', () => {
+  const funnel = htmlSection('Triage funnel');
+  assert.match(funnel, /<tr><td>triage:pending<\/td><td class="num">6<\/td><td class="num">55%<\/td><\/tr>/);
+  assert.equal([...funnel.matchAll(/<tr><td>/g)].length, 3);
+  assert.match(funnel, /the <strong>11<\/strong> issues created in the window\. 9 carry a <code>triage:\*<\/code> label and appear above; the other 2 carry none/);
+  assert.doesNotMatch(funnel, /10 carry a <code>triage:\*<\/code> label/, 'that is the label count, not the issue count');
+});
+
+test('each HTML lead-time row carries its own median, p90 and n', () => {
+  // Swapping the fix row for the close row publishes the wrong statistic under
+  // the right label, and every "contains a number" test stays green.
+  const lead = htmlSection('Lead times');
+  assert.match(lead, /<tr><td>Issue opened → closed<\/td><td class="num">5<\/td><td class="num">35\.5<\/td><td class="num">12<\/td><\/tr>/);
+  assert.match(lead, /<tr><td>Issue opened → fix merged<\/td><td class="num">12<\/td><td class="num">114\.8<\/td><td class="num">6<\/td><\/tr>/);
+  assert.match(lead, /<tr><td>Fix PR opened → merged<\/td><td class="num">5\.1<\/td><td class="num">87<\/td><td class="num">6<\/td><\/tr>/);
+  assert.match(lead, /<strong>Not windowed — all 13 issues, all history\.<\/strong>/);
+});
+
+test('HTML monthly intake renders every windowed month the right way round', () => {
+  const monthly = htmlSection('Monthly intake');
+  assert.match(monthly, /<tr><td>2025-07<\/td><td class="num">1<\/td><td class="num">2<\/td><td class="num">3<\/td><td class="num">27%<\/td><\/tr>/);
+  assert.match(monthly, /<tr><td>2025-11<\/td><td class="num">3<\/td><td class="num">0<\/td><td class="num">3<\/td><td class="num">27%<\/td><\/tr>/);
+  assert.equal([...monthly.matchAll(/<tr><td>/g)].length, 6);
+  assert.doesNotMatch(monthly, /<tr><td>2025-06</, 'June 2025 is outside the window');
+  assert.match(monthly, /the <strong>11<\/strong> issues created in the window, keyed by the month the issue was opened\./);
+});
+
+test('every windowed HTML section states the window it was computed over', () => {
+  for (const heading of ['Intake and outcome', 'Rejection reasons', 'Component',
+                         'Triage funnel', 'Monthly intake']) {
+    assert.ok(htmlSection(heading).includes(WINDOW_LINE),
+      `HTML section "${heading}" does not state its window`);
+  }
+  assert.ok(!htmlSection('Lead times').includes(WINDOW_LINE));
+});
+
+// --- Escaping ----------------------------------------------------------------
+
+test('escapeHtml neutralises every character that can break out of markup', () => {
+  assert.equal(escapeHtml('<script>alert(1)</script>'), '&lt;script&gt;alert(1)&lt;/script&gt;');
+  assert.equal(escapeHtml('a & b'), 'a &amp; b');
+  assert.equal(escapeHtml('say "hi"'), 'say &quot;hi&quot;');
+  assert.equal(escapeHtml("it's"), 'it&#39;s');
+  // The ampersand MUST be replaced first, or the & of &lt; is escaped again.
+  assert.equal(escapeHtml('<'), '&lt;');
+  assert.equal(escapeHtml('&lt;'), '&amp;lt;');
+  assert.equal(escapeHtml(13), '13');
+});
+
+test('a component name from a hostile GitHub label cannot inject markup', () => {
+  // Component names are GitHub LABEL names: chosen outside this repo. A team
+  // label named team:<script> renders as the component <script>.
+  const hostile = [{
+    number: 1,
+    createdAt: '2026-09-01T00:00:00Z',
+    updatedAt: '2026-09-01T00:00:00Z',
+    labels: { nodes: [{ name: 'team:<script>alert("xss")</script>' }, { name: 'triage:pending' }] },
+  }];
+  const page = renderHtml(rollup(hostile, WINDOW), { generatedAt: '2026-09-06T10:00:00Z' });
+
+  // The name is present, escaped, in its own cell...
+  assert.match(page, /<tr><td>&lt;script&gt;alert\(&quot;xss&quot;\)&lt;\/script&gt;<\/td><td class="num">1<\/td><\/tr>/);
+  // ...and nowhere as live markup. Only the page's own <script>-free document
+  // structure remains, so a raw <script> anywhere is an injection.
+  assert.doesNotMatch(page, /<script/i);
+  assert.doesNotMatch(page, /alert\("xss"\)/, 'the raw, unescaped label leaked into the page');
+});
+
+// --- Self-contained, offline, theme-aware -----------------------------------
+
+test('the page is self-contained: no external stylesheet, script or font', () => {
+  assert.doesNotMatch(html, /<link\b/i, 'no external stylesheet — it must render from file://');
+  assert.doesNotMatch(html, /<script\b/i);
+  assert.doesNotMatch(styleBlock, /@import/i);
+  assert.doesNotMatch(styleBlock, /@font-face/i);
+  assert.doesNotMatch(styleBlock, /https?:/i, 'the stylesheet must not fetch anything');
+  // Exactly one inline stylesheet, and it is not empty.
+  assert.equal([...html.matchAll(/<style>/g)].length, 1);
+  assert.ok(styleBlock.length > 500);
+  // The ONLY external reference on the page is the archive link.
+  const urls = [...html.matchAll(/https?:\/\/[^\s"'<>]+/g)].map(m => m[0]);
+  assert.deepEqual(urls, [ARCHIVE_URL]);
+});
+
+test('the archive link is absolute, because the same bytes are served from two depths', () => {
+  // index.html sits at the site root and the dated copy sits in reports/. A
+  // relative "reports/" href resolves to reports/reports/ from the dated copy.
+  assert.equal(ARCHIVE_URL, 'https://skomp.github.io/n8n-reports/reports/');
+  assert.match(html, /<footer><a href="https:\/\/skomp\.github\.io\/n8n-reports\/reports\/">/);
+});
+
+test('every colour is a token defined on bare :root', () => {
+  // A literal outside the token blocks is a colour that works in one theme and
+  // vanishes in the other. Every hex in the stylesheet must be the VALUE of a
+  // custom property.
+  for (const line of styleBlock.split('\n')) {
+    if (!line.includes('#')) continue;
+    assert.match(line.trim(), /^--[\w-]+:\s*#[0-9a-f]{3,8};$/i,
+      `colour literal outside a token definition: ${line.trim()}`);
+  }
+
+  const rootBlock = styleBlock.split(':root {')[1].split('}')[0];
+  const defined = new Set([...rootBlock.matchAll(/(--[\w-]+):/g)].map(m => m[1]));
+  const used = new Set([...styleBlock.matchAll(/var\((--[\w-]+)\)/g)].map(m => m[1]));
+  assert.ok(used.size >= 6, 'expected the palette to be used, not merely declared');
+  for (const token of used) {
+    assert.ok(defined.has(token), `${token} is used but never defined on bare :root`);
+  }
+});
+
+test('the dark scheme redefines only tokens, and body paints an explicit background', () => {
+  const dark = styleBlock.split('@media (prefers-color-scheme: dark) {')[1].split('\n}')[0];
+  assert.ok(dark, 'no dark-scheme block');
+  for (const line of dark.split('\n').map(l => l.trim()).filter(Boolean)) {
+    if (line === ':root {' || line === '}') continue;
+    assert.match(line, /^--[\w-]+:\s*\S+;$/,
+      `the dark block must redefine tokens only, found: ${line}`);
+  }
+  // Every token the dark block redefines must already exist in light.
+  const rootBlock = styleBlock.split(':root {')[1].split('}')[0];
+  const light = new Set([...rootBlock.matchAll(/(--[\w-]+):/g)].map(m => m[1]));
+  for (const [, token] of dark.matchAll(/(--[\w-]+):/g)) {
+    assert.ok(light.has(token), `${token} is defined only for the dark scheme`);
+  }
+  // The viewer paints its own ground behind a transparent body.
+  assert.match(styleBlock, /body\s*\{[^}]*background:\s*var\(--bg\)/);
+  assert.match(styleBlock, /body\s*\{[^}]*color:\s*var\(--text\)/);
+});
+
+test('wide tables scroll inside their own container, never the page', () => {
+  assert.match(styleBlock, /\.table-wrap\s*\{[^}]*overflow-x:\s*auto/);
+  // Every table is wrapped. An unwrapped one makes the whole page scroll
+  // sideways on a phone.
+  const tables = [...htmlBody.matchAll(/<table>/g)].length;
+  const wrappers = [...htmlBody.matchAll(/<div class="table-wrap">\n<table>/g)].length;
+  assert.equal(tables, 6, 'expected six tables');
+  assert.equal(wrappers, tables, 'every table must sit in a .table-wrap');
+});
+
+test('columns of digits are tabular', () => {
+  assert.match(styleBlock, /table\s*\{[^}]*font-variant-numeric:\s*tabular-nums/);
+  assert.match(styleBlock, /\.num\s*\{[^}]*font-variant-numeric:\s*tabular-nums/);
+  assert.match(styleBlock, /\.num\s*\{[^}]*text-align:\s*right/);
+  // The class has to be on the cells, not merely declared.
+  assert.ok([...htmlBody.matchAll(/class="num"/g)].length > 20);
+});
+
+test('the page carries no emoji section markers', () => {
+  assert.doesNotMatch(html, /\p{Extended_Pictographic}/u);
+});
+
+// --- Parity with the markdown ------------------------------------------------
+
+test('the HTML carries every caveat the markdown carries', () => {
+  // Both renderings come from one CAVEATS array, so this is a guard against
+  // that being unpicked rather than against a typo.
+  const mdCaveats = md.split('## Coverage and caveats\n\n')[1]
+    .trim().split('\n').filter(l => l.startsWith('- '));
+  const htmlCaveats = [...htmlSection('Coverage and caveats').matchAll(/<li>/g)];
+  assert.equal(mdCaveats.length, CAVEAT_COUNT);
+  assert.equal(htmlCaveats.length, CAVEAT_COUNT,
+    'the HTML dropped a caveat the markdown publishes');
+
+  // Each caveat, identified by a phrase that appears in no other one.
+  for (const phrase of ['system of record', 'different populations on purpose',
+                        'Unlabelled community issues are out of scope',
+                        'It is reported, not hidden',
+                        'Linked-but-unmerged PRs are excluded']) {
+    assert.ok(md.includes(phrase), `markdown lost: ${phrase}`);
+    assert.ok(html.includes(phrase), `HTML lost: ${phrase}`);
+  }
+});
+
+test('the HTML carries every section heading the markdown does', () => {
+  for (const heading of ['Headline', 'Intake and outcome', 'Rejection reasons', 'Component',
+                         'Triage funnel', 'Lead times', 'Monthly intake', 'Coverage and caveats']) {
+    assert.ok(html.includes(`<h2>${heading}</h2>`), `missing HTML section: ${heading}`);
+  }
+});
+
+test('HTML rendering is deterministic for a fixed input', () => {
+  assert.equal(html, renderHtml(rollup(issues, WINDOW), { generatedAt: '2026-09-06T10:00:00Z' }));
 });
