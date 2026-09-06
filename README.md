@@ -13,6 +13,44 @@ should never have entered the bug tracker.
 
 ---
 
+## How this project came about
+
+This began as the "build your first workflow" exercise that ships with n8n — a
+small task for an n8n job application.
+
+The first version was built with **n8n Cloud's built-in AI workflow builder**.
+It did the obvious thing: fetch issues and pull requests from GitHub and
+aggregate them in a Code node. Against a repository the size of `n8n-io/n8n`
+that ran out of memory, and the resulting workspace instability made further
+iteration through the built-in builder impractical.
+
+The interesting part was *why*. n8n holds every node's output array in memory
+for the whole execution, so what fails is the **item count**, not the payload
+size — and no amount of trimming fields fixes that. Everything below is a
+consequence of designing around that constraint rather than shrinking the
+dataset until it fit.
+
+At that point n8n's **instance-level MCP server** was enabled and Claude Code
+connected to it. From there the workflows were developed and deployed through
+that connection: authored here as library code with tests, generated into
+workflow JSON, and pushed to the instance over MCP. That is also how the
+node type versions, the Merge node's semantics, and the Code node's sandbox
+restrictions were established — by asking the live instance rather than
+guessing.
+
+The recurring work still runs in n8n Cloud. Only the one-off historical
+backfill runs locally, because it is the single job whose item count cannot be
+bounded. The workflow generator and its tests exist so that the logic
+developed here and the logic running inside the n8n Code nodes cannot drift
+apart.
+
+**The progression, in short:** first workflow → AI-generated naive version →
+real out-of-memory failure → investigate the runtime constraints → move
+authoring to Claude Code over n8n's MCP server → redesign around the
+constraints → deploy and run the recurring workflows in n8n Cloud.
+
+---
+
 ## Quick start
 
 ```bash
@@ -25,11 +63,7 @@ There is nothing to install. Node 24, no `npm install`, no lockfile, no
 standard library. That is a deliberate constraint, not an accident: this code
 gets inlined into n8n Code nodes, which cannot import anything.
 
-## Why this exists
-
-An earlier attempt at the same analysis **ran out of memory during
-aggregation**. That failure drove every significant decision here, so it is
-worth being precise about the cause.
+## Designing around the memory constraint
 
 n8n holds every node's output array in memory for the entire execution. Fetch
 40,000 issues and fold them in a Code node, and you are holding 40,000 items at
