@@ -303,11 +303,54 @@ suggest the issue should never have been filed as a bug
 6. **Coverage and caveats** — population size, what fraction is unclassified,
    and an explicit statement that Linear-tracked work is invisible here.
 
+### Report window — added 2026-09-06
+
+The store keeps **full history**. The report **windows its intake sections to the
+last 6 months** (`createdAt >= now - 180d`) and computes **lead times over all
+history**. This split is deliberate and load-bearing.
+
+**Why lead times must not be windowed.** Measured on the real store:
+
+| Fix lead time | n | median |
+|---|---|---|
+| All history | 543 | **25.3 days** |
+| Created in last 6 months only | 247 | **12.7 days** |
+
+A 6-month window understates the median by roughly 2x. The mechanism is truncation
+bias: an issue created 8 months ago and fixed 2 months ago falls outside a
+created-date window, and slow-to-fix issues are exactly the ones that spill out of a
+short window. Dropping them removes the tail, and the tail is the lead-time story.
+This is the same failure the median-over-mean rule exists to prevent, reintroduced at
+the data-selection layer where no statistic can correct for it.
+
+**Windowed sections:** intake and outcome, rejection reasons, component, triage
+funnel, monthly intake, and the headline.
+**Unwindowed sections:** all three lead-time measures.
+
+**Do not window `filterBy: {since:}` at the API to achieve this.** That parameter
+filters on `updatedAt`, not `createdAt` — it returns 2,286 issues where a created-date
+window returns 1,736, because 550 issues created before the window were touched inside
+it. The window is a report-side filter on `createdAt`, applied after ingest.
+
+**Measured window figures** (window opening 2026-03-06, against 5,464 all-time):
+
+| Figure | Windowed | All-time |
+|---|---|---|
+| Population | 1,736 | 5,464 |
+| Accepted | 843 | 2,508 |
+| Rejected | 893 | 2,956 |
+| Should-not-have-been-filed | 722 (**42%**) | 2,336 (**43%**) |
+
+The headline section states both, because the near-identical rate is itself the
+finding: the intake-quality problem is stable over time, not improving.
+
 ### Statistical rules
 
 - **Report median and p90, never mean.** Lead-time distributions on a public
   repository have a long tail; a handful of multi-year-old issues drag any
   average into meaninglessness.
+- **State the window on every windowed table.** A reader must never have to guess
+  whether a number covers 6 months or 6 years.
 - **Always print the denominator.** Every grouping states what share of the
   population it covers. `unclassified` is a visible row, never dropped.
 
