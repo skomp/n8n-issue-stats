@@ -63,6 +63,9 @@ export async function fetchAll({ token, since = null, onPage = null }) {
     points += page.cost;
     if (onPage) onPage({ pages, points, received: issues.length, remaining: page.remaining });
     if (!page.hasNextPage) break;
+    // A repeated endCursor means the API cannot advance. Stop rather than
+    // loop forever against the rate limit.
+    if (page.endCursor === cursor) break;
     cursor = page.endCursor;
   }
 
