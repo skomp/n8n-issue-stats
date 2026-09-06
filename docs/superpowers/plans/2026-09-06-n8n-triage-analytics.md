@@ -1218,12 +1218,24 @@ node -e "
 import('./src/lib/rollup.js').then(async ({rollup}) => {
   const {readFileSync} = await import('node:fs');
   const rs = readFileSync('data/issues.ndjson','utf8').trim().split('\n').map(JSON.parse);
-  const r = rollup(rs);
+  // windowDays MUST be passed explicitly. rollup() defaults to a 180-day
+  // intake window, so rollup(rs) measures 1,688 recently created issues, not
+  // the full 5,464-record population the figures below were measured over.
+  // 100000 days is longer than the repository has existed, so it selects
+  // everything and reproduces the spec's all-time figures.
+  const r = rollup(rs, { windowDays: 100000 });
   console.log('accepted', r.segments.accepted, '(expect 2508)');
   console.log('rejected', r.segments.rejected, '(expect 2956)');
   console.log('coverage', Math.round(r.componentCoverage*100)+'%', '(expect 65%)');
 });"
 ```
+
+**Correction, 2026-09-06.** This snippet previously called `rollup(rs)` with no
+options. After the windowing change that measured the 180-day window, so it
+printed accepted 824, rejected 864 and coverage 95% against expectations of
+2508, 2956 and 65% — a permanent, misleading MISMATCH against a correct
+implementation. Executed with the explicit window above, it prints 2508 / 2956
+/ 65.0%.
 
 - [ ] **Step 4: Write `README.md`**
 
