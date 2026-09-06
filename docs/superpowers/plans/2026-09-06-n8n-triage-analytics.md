@@ -948,11 +948,16 @@ test('unclassified is shown, never silently dropped', () => {
   assert.ok(md.includes('unclassified'));
 });
 
-// The spec forbids means: a long tail makes them meaningless here.
-test('lead times are labelled median and p90, never mean or average', () => {
+// The spec forbids REPORTING a mean; the prose may still explain why.
+// A document-wide word ban fails against our own caveat text ("an average
+// would be meaningless") and tempts an implementer to delete the caveat.
+// Assert on the table headers instead, which is what the rule is about.
+test('no mean or average column is published', () => {
   assert.match(md, /median/i);
   assert.match(md, /p90/i);
-  assert.doesNotMatch(md, /\bmean\b|\baverage\b/i);
+  const headers = md.split('\n').filter(l => l.startsWith('| Measure'));
+  assert.ok(headers.length > 0, 'lead-time table must exist');
+  for (const h of headers) assert.doesNotMatch(h, /\bmean\b|\baverage\b/i);
 });
 
 test('the Linear caveat is stated so nobody reads this as delivery data', () => {
@@ -1156,7 +1161,9 @@ If the file exceeds the Contents API limit, push it with a normal git clone and 
 
 **Interfaces:**
 - Consumes: `fetchAll` (Task 5), store helpers (Task 4)
-- Produces: `syncSince(store, {token, now}) -> {store, fetched, watermark}`
+- Produces:
+  - `syncSince(store, {token}) -> {store, fetched, watermark}`
+  - `overlapWindow(watermark) -> string | null` — exported for direct testing
 
 - [ ] **Step 1: Write the failing test**
 
