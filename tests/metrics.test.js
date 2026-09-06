@@ -45,6 +45,48 @@ test('an issue with no linked PR yields no fix lead time', () => {
   assert.equal(leadTimes(byNumber.get(21305)).fixDays, null);
 });
 
+// I6: closeDays and prDays previously had no decoded expectation, so
+// computing closeDays against `updatedAt` and prDays against the ISSUE's
+// createdAt both survived the suite. On the 10 real records closedAt and
+// updatedAt differ by at most 9 seconds, so only the synthetic records
+// 900001/900002 can separate them.
+test('close lead time is measured to closedAt, not updatedAt', () => {
+  assert.equal(round1(leadTimes(byNumber.get(900001)).closeDays), 3.7);
+  assert.equal(round1(leadTimes(byNumber.get(900002)).closeDays), 9.2);
+  assert.equal(round1(leadTimes(byNumber.get(17688)).closeDays), 112);
+  assert.equal(round1(leadTimes(byNumber.get(16207)).closeDays), 35.5);
+});
+
+test('PR lead time is measured from the PR opening, not the issue opening', () => {
+  // #16038: issue opened 2025-06-05, PR opened 2025-06-19, merged 2025-06-20.
+  // Measuring from the issue would give 15.4, the fixDays value.
+  assert.equal(round1(leadTimes(byNumber.get(16038)).prDays), 0.9);
+  assert.equal(round1(leadTimes(byNumber.get(17688)).prDays), 87);
+  assert.equal(round1(leadTimes(byNumber.get(22016)).prDays), 22.3);
+  assert.equal(round1(leadTimes(byNumber.get(22153)).prDays), 2.8);
+  assert.equal(round1(leadTimes(byNumber.get(22122)).prDays), 3.6);
+});
+
+// SYNTHETIC FIXTURES 900001/900002. C1: the test above named "an unmerged
+// linked PR yields no fix lead time" passed for the WRONG reason — without the
+// mergedAt filter, merged[0].mergedAt is null and days() returns null through
+// its own `from && to` guard, so the assertion could not tell the two apart.
+// #900002 has BOTH an unmerged and a merged PR, so dropping the filter yields a
+// real number computed from the wrong PR rather than null.
+test('an unmerged-only PR yields no fix or PR lead time', () => {
+  const lt = leadTimes(byNumber.get(900001));
+  assert.equal(lt.fixDays, null);
+  assert.equal(lt.prDays, null);
+});
+
+test('lead times use the merged PR when an unmerged PR is also linked', () => {
+  // The unmerged PR sorts first by number and by createdAt; only the mergedAt
+  // filter keeps it out. Computed from PR 900202 (merged 2026-02-10T14:24:00Z).
+  const lt = leadTimes(byNumber.get(900002));
+  assert.equal(round1(lt.fixDays), 8.6);
+  assert.equal(round1(lt.prDays), 6.6);
+});
+
 test('lead times are never negative', () => {
   for (const issue of byNumber.values()) {
     for (const v of Object.values(leadTimes(issue))) {

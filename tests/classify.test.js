@@ -54,3 +54,19 @@ test('the dominant package wins, not the first seen', () => {
 test('non-package paths are ignored', () => {
   assert.equal(packageOf(['README.md', '.github/workflows/ci.yml']), null);
 });
+
+// SYNTHETIC FIXTURES 900001/900002. These exist because no REAL fixture reaches
+// the merged-PR branch of componentOf with an unmerged PR in play: #16207 has an
+// unmerged PR but a team: label short-circuits first, and #16971 is rejected.
+// Without these, deleting the `pr.mergedAt != null` filter at classify.js:39
+// leaves the whole suite green.
+test('an unmerged PR is not evidence of a component', () => {
+  assert.equal(componentOf(byNumber.get(900001)), 'unclassified');
+});
+
+test('a merged PR outranks an unmerged PR that touches more files', () => {
+  // #900002 links an unmerged PR touching 2 files in packages/cli and a merged
+  // PR touching 1 file in packages/nodes-base. Counting the unmerged PR would
+  // return 'packages/cli'.
+  assert.equal(componentOf(byNumber.get(900002)), 'packages/nodes-base');
+});

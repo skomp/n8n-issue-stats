@@ -6,12 +6,27 @@ import { parseStore, serialiseStore, upsert, watermarkOf } from '../src/lib/stor
 const text = readFileSync('tests/fixtures/issues.sample.ndjson', 'utf8');
 
 test('parses every fixture record', () => {
-  assert.equal(parseStore(text).size, 10);
+  assert.equal(parseStore(text).size, 12);
 });
 
+// I7: the old assertion compared only KEYS, so rewriting serialiseStore to emit
+// {number} alone — discarding labels, timestamps and every PR reference —
+// passed a test named "round-trips without loss". This file is the durable
+// artefact in skomp/n8n-data; silent field loss there is unrecoverable without
+// a full re-backfill.
 test('round-trips without loss', () => {
   const once = parseStore(text);
-  assert.deepEqual([...parseStore(serialiseStore(once)).keys()].sort(), [...once.keys()].sort());
+  const twice = parseStore(serialiseStore(once));
+  assert.deepEqual([...twice.keys()].sort(), [...once.keys()].sort());
+  for (const number of once.keys()) {
+    assert.deepEqual(twice.get(number), once.get(number), `#${number} lost fields`);
+  }
+  // Named explicitly so the nested PR and label structures are covered even if
+  // the loop above is ever weakened.
+  assert.deepEqual(twice.get(16038), once.get(16038));
+  assert.deepEqual(twice.get(900002), once.get(900002));
+  assert.equal(twice.get(16038).labels.nodes.length, 2);
+  assert.equal(twice.get(900002).closedByPullRequestsReferences.nodes.length, 2);
 });
 
 test('serialises ascending by issue number and ends with a newline', () => {
@@ -22,7 +37,7 @@ test('serialises ascending by issue number and ends with a newline', () => {
 });
 
 test('tolerates blank lines and trailing whitespace', () => {
-  assert.equal(parseStore('\n' + text + '\n\n').size, 10);
+  assert.equal(parseStore('\n' + text + '\n\n').size, 12);
 });
 
 // The incremental sync deliberately re-fetches an overlapping window.
