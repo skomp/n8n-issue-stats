@@ -10,6 +10,47 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-06-n8n-github-triage-analytics-design.md` — read it before Task 1. It carries every measured fact and must not be re-derived.
 
+---
+
+> ## CORRECTION — fix round 1, 2026-09-06
+>
+> **Every fixture-derived count in this plan is now out of date. Read the tests,
+> not this plan, for expected values.**
+>
+> A mutation review ran 17 mutations against the finished build. 14 survived with
+> the suite green, including deletion of both `mergedAt` filters. The root cause
+> was that no real fixture record reaches the merged-PR branch of `componentOf`
+> with an unmerged PR in play, so the filter had no test that could see it.
+>
+> Fix round 1 appended two SYNTHETIC records, numbered **900001** and **900002**,
+> to `tests/fixtures/issues.sample.ndjson`. The 10 real records are byte-identical
+> and were neither edited nor reordered. The fixture now holds **12 records**.
+>
+> | Claim in this plan | Was | Now |
+> |---|---|---|
+> | Fixture size | 10 real records | 10 real + 2 synthetic = 12 |
+> | Segment split | 8 accepted / 2 rejected | 10 accepted / 2 rejected |
+> | Issues with a merged closing PR | 5 of 10 | 6 of 12 |
+> | `components.unclassified` | 2 | 3 |
+> | `components['packages/nodes-base']` | 2 | 3 |
+> | Component coverage on fixtures | 6/8 | 7/10 |
+> | Task 3 step 5 assertion | `acc !== 8` | `acc !== 10` |
+>
+> Two spec violations were also fixed, because the spec is binding above this
+> plan. The plan omitted both:
+>
+> 1. Spec section 8 mandates a **Headline** metric. `rollup()` now returns
+>    `headline: { shouldNotHaveBeenFiled, shareOfPopulation }`, counted from
+>    `closed:incomplete-template`, `closed:support-issue` and
+>    `closed:non-english` (an issue carrying two of them counts once). The
+>    report renders a `## Headline` section before `## Intake and outcome`.
+>    On the full store this measures 2,336 issues, 43%.
+> 2. Spec section 8 mandates **"always print the denominator"**. The rejection
+>    reasons, triage funnel and monthly intake tables printed none. Each now
+>    carries a Share column and a stated denominator line.
+
+---
+
 ## Global Constraints
 
 - **The code in this plan is a PROPOSAL, not requirements.** It has not been executed. Be sceptical of it. If you conclude a snippet is wrong, say so with evidence and report the defect rather than implementing something you believe is incorrect. Two defects were already found and fixed during planning (see below); assume more remain.
@@ -302,7 +343,7 @@ Expected: PASS, 8 tests
 
 - [ ] **Step 5: Verify against the whole population**
 
-This guards the aggregate, not just the fixtures. Run the backfill store through the classifier once it exists (Task 7); for now assert the fixture split is 8 accepted / 2 rejected:
+This guards the aggregate, not just the fixtures. Run the backfill store through the classifier once it exists (Task 7); for now assert the fixture split is 10 accepted / 2 rejected (CORRECTED in fix round 1; it was 8 accepted before the two synthetic records were appended):
 
 ```bash
 node -e "
@@ -311,7 +352,7 @@ import('./src/lib/classify.js').then(async ({segmentOf}) => {
   const rs = readFileSync('tests/fixtures/issues.sample.ndjson','utf8').trim().split('\n').map(JSON.parse);
   const acc = rs.filter(r => segmentOf(r)==='accepted').length;
   console.log('accepted', acc, 'rejected', rs.length-acc);
-  if (acc !== 8) { console.error('EXPECTED 8 accepted'); process.exit(1); }
+  if (acc !== 10) { console.error('EXPECTED 10 accepted'); process.exit(1); }
 });"
 ```
 Expected: `accepted 8 rejected 2`
@@ -814,7 +855,9 @@ test('rejection reasons are counted from closed:* labels', () => {
   assert.equal(r.rejectionReasons['closed:enhancement/feature'], 1);
 });
 
-// Only 5 of the 10 fixtures have a merged closing PR.
+// CORRECTED in fix round 1: 6 of the 12 fixtures have a merged closing PR
+// (it was 5 of 10 before the synthetic records 900001/900002 were appended).
+// This assertion was also strengthened to check the median and p90 by value.
 test('fix lead time is computed over merged PRs only', () => {
   assert.equal(r.leadTimes.fix.n, 5);
   assert.ok(r.leadTimes.fix.median > 0);

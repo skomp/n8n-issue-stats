@@ -1,9 +1,11 @@
 # n8n triage analytics
 
 This project ingests triaged GitHub issues from `n8n-io/n8n` and publishes a
-weekly markdown report on issue triage outcomes: how many issues are accepted
-versus rejected, which components carry the accepted load, rejection reasons,
-and lead-time statistics.
+weekly markdown report on issue triage outcomes: a headline stating the
+accepted/rejected ratio and how many issues should never have been filed as a
+bug, then how many issues are accepted versus rejected, which components carry
+the accepted load, rejection reasons, and lead-time statistics. Every grouping
+in the report prints its denominator.
 
 ## The three repos
 
@@ -54,7 +56,25 @@ npm test
 
 This runs the full suite with Node's built-in test runner
 (`node --test tests/*.test.js`). The project has zero runtime or dev
-dependencies.
+dependencies. Use the glob form: `node --test tests/` (with a trailing slash)
+is broken in Node 24 and silently runs nothing.
+
+### The test fixture
+
+`tests/fixtures/issues.sample.ndjson` holds **12 records: 10 real** ones
+captured from the live repository, then **2 synthetic** ones numbered 900001
+and 900002. The synthetic records exist because no real record reaches the
+merged-PR branch of `componentOf` with an unmerged PR also linked, so the
+`mergedAt` filters in `src/lib/classify.js` and `src/lib/metrics.js` had no
+test that could fail when they were deleted. Both filters are load-bearing:
+55% of linked PRs are never merged.
+
+Do not edit or reorder the 10 real records. Append new synthetic records at
+the end of the file, and update the tests that assert fixture-derived counts
+(`tests/rollup.test.js`, `tests/report.test.js`, `tests/store.test.js`).
+
+Assert **decoded values**, not shapes. A test that only checks
+`median > 0` holds for almost any wrong number.
 
 ## Deployment is blocked on the free trial
 
