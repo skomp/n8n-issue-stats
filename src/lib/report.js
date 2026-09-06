@@ -26,7 +26,11 @@ export function renderReport(r, { generatedAt }) {
   const { total, segments: s, window: w } = r;
   const lt = r.leadTimes;
   const h = r.headline;
-  const triaged = Object.values(r.triageStates).reduce((a, b) => a + b, 0);
+  // NOT Object.values(r.triageStates).reduce(...) — that sums LABELS, and an
+  // issue may carry more than one triage:* label (237 of 1,309 do on the real
+  // store). The funnel denominator sentence is about ISSUES, so it must use
+  // the per-issue count. See src/lib/rollup.js.
+  const triaged = r.triagedIssues;
   const since = w.since.slice(0, 10);
   const windowLine = `Window: the ${w.days} days since ${since}.`;
 
@@ -75,7 +79,7 @@ ${windowLine}
 ${table(['State', 'Issues', 'Share'],
   sortedEntries(r.triageStates).map(([k, v]) => [k, v, pct(v, w.population)]))}
 
-Denominator: the **${w.population}** issues created in the window. ${triaged} carry a \`triage:*\` label and appear above; the other ${w.population - triaged} carry none and appear in no row.
+Denominator: the **${w.population}** issues created in the window. ${triaged} carry a \`triage:*\` label and appear above; the other ${w.population - triaged} carry none and appear in no row. The rows count labels, not issues: an issue carrying two \`triage:*\` labels appears in two rows, so the counts need not sum to ${triaged} and the shares need not sum to 100%.
 
 ## Lead times
 

@@ -16,7 +16,7 @@ const summarise = xs => ({ median: median(xs), p90: p90(xs), n: xs.length });
 //
 //   WINDOWED by createdAt >= now - windowDays:
 //     segments, rejectionReasons, components, componentCoverage,
-//     triageStates, byMonth, headline.
+//     triageStates, triagedIssues, byMonth, headline.
 //     These describe INTAKE. "What is arriving, and what do we do with it"
 //     is a question about the recent past; answering it over five years of
 //     history buries a change in triage practice under the back catalogue.
@@ -48,6 +48,7 @@ export function rollup(issues, { windowDays = 180, now = new Date() } = {}) {
   const close = [], fix = [], pr = [];
   let windowPopulation = 0;
   let shouldNotHaveBeenFiled = 0, shouldNotHaveBeenFiledAllTime = 0;
+  let triagedIssues = 0;
 
   for (const issue of issues) {
     // --- All history: lead times and the all-time headline ------------------
@@ -70,10 +71,19 @@ export function rollup(issues, { windowDays = 180, now = new Date() } = {}) {
     const segment = segmentOf(issue);
     segments[segment] += 1;
 
+    // triageStates counts LABELS; triagedIssues counts ISSUES. They are not
+    // interchangeable and summing the first does NOT give the second: on the
+    // real store 1,546 triage:* labels are spread across 1,309 issues, because
+    // 237 issues carry more than one. Deriving the funnel denominator by
+    // summing triageStates published "1546 carry a triage label ... the other
+    // 3918 carry none" against a truth of 1,309 and 4,155. Use triagedIssues
+    // for any per-issue denominator.
+    let carriesTriageLabel = false;
     for (const n of names) {
       if (n.startsWith('closed:')) bump(rejectionReasons, n);
-      if (n.startsWith('triage:')) bump(triageStates, n);
+      if (n.startsWith('triage:')) { bump(triageStates, n); carriesTriageLabel = true; }
     }
+    if (carriesTriageLabel) triagedIssues += 1;
 
     if (neverShouldHaveBeenFiled) shouldNotHaveBeenFiled += 1;
 
@@ -108,6 +118,7 @@ export function rollup(issues, { windowDays = 180, now = new Date() } = {}) {
     components,
     componentCoverage: segments.accepted === 0 ? 0 : classified / segments.accepted,
     triageStates,
+    triagedIssues,
     leadTimes: { close: summarise(close), fix: summarise(fix), pr: summarise(pr) },
     byMonth,
   };

@@ -86,17 +86,27 @@ is broken in Node 24 and silently runs nothing.
 
 ### The test fixture
 
-`tests/fixtures/issues.sample.ndjson` holds **12 records: 10 real** ones
-captured from the live repository, then **2 synthetic** ones numbered 900001
-and 900002. The synthetic records exist because no real record reaches the
-merged-PR branch of `componentOf` with an unmerged PR also linked, so the
-`mergedAt` filters in `src/lib/classify.js` and `src/lib/metrics.js` had no
-test that could fail when they were deleted. Both filters are load-bearing:
-55% of linked PRs are never merged.
+`tests/fixtures/issues.sample.ndjson` holds **13 records: 10 real** ones
+captured from the live repository, then **3 synthetic** ones numbered 900001,
+900002 and 900003. Each synthetic record exists because a real one could not
+make a specific test able to fail:
+
+- **900001 and 900002** — no real record reaches the merged-PR branch of
+  `componentOf` with an unmerged PR also linked, so the `mergedAt` filters in
+  `src/lib/classify.js` and `src/lib/metrics.js` had no test that could fail
+  when they were deleted. Both filters are load-bearing: 55% of linked PRs are
+  never merged.
+- **900003** — no real fixture record carried **two** `triage:*` labels, so
+  summing `triageStates` (a count of labels) happened to equal the count of
+  issues, and a funnel denominator built on that sum passed for the wrong
+  reason. On the real store the two differ: 1,546 labels across 1,309 issues.
+  900003 carries `triage:pending` and `triage:needs-info` so the two counts can
+  never coincide here again.
 
 Do not edit or reorder the 10 real records. Append new synthetic records at
 the end of the file, and update the tests that assert fixture-derived counts
-(`tests/rollup.test.js`, `tests/report.test.js`, `tests/store.test.js`).
+(`tests/rollup.test.js`, `tests/report.test.js`, `tests/store.test.js`,
+`tests/build.test.js`).
 
 Assert **decoded values**, not shapes. A test that only checks
 `median > 0` holds for almost any wrong number.

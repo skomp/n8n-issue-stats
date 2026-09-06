@@ -149,8 +149,8 @@ test('buildReportPayload folds the whole store into a single object, not an arra
   assert.equal(Array.isArray(payload), false);
   assert.equal(typeof payload.content, 'string');
   assert.equal(payload.path, 'reports/2026-09-06-triage.md');
-  // Value check, not shape check: the fixture's known population.
-  assert.match(payload.content, /Population: \*\*12\*\*/);
+  // Value check, not shape check: the fixture's known population (13 records).
+  assert.match(payload.content, /Population: \*\*13\*\*/);
 });
 
 // --- Generated workflow structure --------------------------------------------
