@@ -41,6 +41,23 @@ the API is unavailable on the n8n Cloud free trial, the MCP server is not
 tier-gated. `scripts/deploy.sh` targets the REST API and is for when the
 account moves to a paid plan.
 
+**`scripts/deploy.sh` has never been executed.** It conforms to n8n's published
+OpenAPI schema and `tests/deploy.test.js` exercises its logic, including a run
+against a local stub of the API. That is not the same claim as "it works". Do
+not describe it as tested, and do not let a green suite imply a successful
+deploy.
+
+Two rules the script depends on, both from that schema:
+
+- The request body carries only `name`, `nodes`, `connections`, `settings` and
+  the optional properties the schema accepts. `active` is `readOnly` and both
+  request schemas set `additionalProperties: false`, so an extra property is a
+  400. The generated files keep `active: false` on purpose; the body is shaped
+  in `scripts/deploy-payload.js` instead.
+- The two sub-workflows deploy **before** the orchestrator, and the ids the API
+  returns are substituted into the orchestrator's Execute Workflow nodes. On a
+  new instance the compiled-in ids do not exist. Never restore a glob loop.
+
 ## Tests
 
 `npm test` runs `node --test tests/*.test.js`. **Never `node --test tests/`** —

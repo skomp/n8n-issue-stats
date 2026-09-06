@@ -54,7 +54,7 @@ constraints → deploy and run the recurring workflows in n8n Cloud.
 ## Quick start
 
 ```bash
-npm test                                        # 195 tests, zero dependencies
+npm test                                        # 226 tests, zero dependencies
 GITHUB_TOKEN=$(gh auth token) npm run backfill  # one-off, ~3.5 min, writes data/issues.ndjson
 ```
 
@@ -268,7 +268,8 @@ src/backfill.js       One-off historical load (local)
 src/sync.js           Incremental sync with watermark
 build/                Workflow generator
 workflows/            Generated n8n workflow JSON (ingest, report, orchestrator)
-scripts/deploy.sh     REST deploy (needs a paid n8n plan — see below)
+scripts/deploy.sh     REST deploy — never executed (needs a paid n8n plan)
+scripts/deploy-payload.js  Shapes the REST request body; substitutes sub-workflow ids
 ```
 
 ## Design decisions a reviewer should push on
@@ -302,7 +303,7 @@ population}` so every table can print the denominator it actually used.
 
 ## What the tests are for
 
-195 tests, and the number is not the point. Partway through, a mutation review
+226 tests, and the number is not the point. Partway through, a mutation review
 seeded 17 deliberate bugs into a suite of 42 passing tests. **14 of them
 survived with the suite fully green** — including deleting the `mergedAt`
 filter, the single most load-bearing rule in the codebase.
@@ -361,8 +362,16 @@ Reading a 136-byte `state.json` does not prove you can read a 2.9 MB
 
 ## Deployment
 
-n8n's **public REST API is unavailable on the free trial**. `scripts/deploy.sh`
-targets it and is correct for a paid plan, but cannot run today.
+There are two deploy paths. **One is tested and one is not**, and the
+difference matters more than the code they share.
+
+| Path | Status | Evidence |
+|---|---|---|
+| **Instance MCP server** | **Tested.** Every deployment in this project went through it — all three workflows, created and updated repeatedly, then run. | The runs in "What has actually been run" below. |
+| **`scripts/deploy.sh`** (public REST API) | **Never executed. Not once.** It conforms to n8n's published OpenAPI schema and its logic is unit tested, which is a different claim from "known to work". | `tests/deploy.test.js`, plus a local stub of the API. No call has ever reached n8n. |
+
+n8n's **public REST API is unavailable on the free trial**, which is why
+`deploy.sh` has never run: creating an API key is gated on a paid plan.
 
 The instance-level **MCP server works instead** — it authorises over OAuth and
 is not tier-gated, unlike Git source control (Business/Enterprise only). So
@@ -371,6 +380,40 @@ workflows can be authored offline and deployed as code without a paid plan:
 ```bash
 claude mcp add --transport http n8n https://<instance>.app.n8n.cloud/mcp-server/http
 ```
+
+### What `deploy.sh` was fixed for, and what that fix does not prove
+
+Two defects were found by reading n8n's schema rather than by running anything
+([#8](https://github.com/skomp/n8n-test/issues/8)):
+
+1. **The body carried a rejected property.** The generated files hold
+   `active: false` at the top level. `active` is `readOnly: true` in the
+   schema, and both request schemas set `additionalProperties: false`, so the
+   API returns a 400 rather than ignoring it. The script would have failed on
+   its first call. The body is now shaped to the four required properties plus
+   the optional ones the schema accepts — in `scripts/deploy-payload.js`, not
+   in the generator, because `active: false` is worth keeping in a checked-in
+   workflow file: it records that nothing runs on a schedule.
+2. **Matching by name allocates new ids.** On an instance where these
+   workflows do not exist, all three are created with new ids — but the
+   orchestrator addresses its sub-workflows by the ids they carry on *this*
+   instance. Three workflows would deploy and one would be silently broken,
+   failing at run time rather than at deploy time. The two sub-workflows are
+   now deployed first and the ids the API returns are substituted into the
+   orchestrator before it is sent. The order is written out in the script; it
+   must never go back to iterating a glob.
+
+The shaping and the substitution live in JavaScript so they can be unit tested,
+because the API cannot test them. `tests/deploy.test.js` also runs the script
+end to end against a **local stub** on `127.0.0.1` that answers the way the
+documented schema says n8n answers — that covers the deploy order and the id
+capture, which no unit test reaches.
+
+**None of this is evidence that the script works.** The stub was written from
+the same reading of the schema as the fix, so it cannot disagree with it. The
+first real run against a paid instance is still the first run. This repository
+has already been bitten once by treating a cheap check as proof of health, and
+"conforms to the documented schema" is not "known to work".
 
 Node type versions are read from the live instance rather than assumed —
 `scheduleTrigger` 1.4, `httpRequest` 4.5, `code` 2, `merge` 3.2,
