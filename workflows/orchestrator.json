@@ -71,6 +71,21 @@
       },
       "notes": "MUST NOT START BEFORE \"Run ingest\" HAS FINISHED. The report is rendered from issues.ndjson, which the ingest rewrites; started early it reads the store as it was BEFORE this week's sync and publishes a report over stale data. Nothing fails and the run is green — the only symptom is a report that is quietly a week behind. Two things enforce the order: this node is downstream of \"Run ingest\" on the wire, and \"Run ingest\" sets options.waitForSubWorkflow explicitly, so it blocks until the ingest sub-execution ends instead of firing it and continuing.",
       "notesInFlow": false
+    },
+    {
+      "name": "Note: why the order is enforced",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -300
+      ],
+      "parameters": {
+        "content": "**The order is the whole point**\n\nThe report renders from issues.ndjson, which the ingest rewrites. Started early it publishes a report over stale data: nothing fails, the run is green, and the only symptom is a report quietly a week behind. \"Run ingest\" sets waitForSubWorkflow explicitly for that reason.",
+        "height": 240,
+        "width": 640,
+        "color": 3
+      }
     }
   ],
   "connections": {

@@ -54,7 +54,7 @@ constraints → deploy and run the recurring workflows in n8n Cloud.
 ## Quick start
 
 ```bash
-npm test                                        # 190 tests, zero dependencies
+npm test                                        # 195 tests, zero dependencies
 GITHUB_TOKEN=$(gh auth token) npm run backfill  # one-off, ~3.5 min, writes data/issues.ndjson
 ```
 
@@ -187,6 +187,21 @@ repo.
 source into their Code nodes, so **the deployed logic cannot drift from the
 tested logic**. There is one implementation, not two.
 
+### The canvases document themselves
+
+Each generated workflow carries **sticky notes** (`n8n-nodes-base.stickyNote`,
+typeVersion 1): five on the ingest, four on the report, one on the orchestrator.
+They are grouped **by phase, never per node** — a note per node would restate
+the node name the canvas already draws. What the canvas cannot show is why the
+graph has this shape: why two branches, why a Merge that passes no data, why an
+extra media type on one read, why the writes are ordered.
+
+A sticky note is a node with no connections, so it changes no behaviour. Tests
+assert the count per workflow, that each note still carries the fact its phase
+turns on, that the measured figures (2.86 MB, 5,464, 180 days, 90%) survive, and
+that **no note covers a functional node or another note** — a note drawn over a
+node hides it, and n8n gives no warning.
+
 ### The orchestrator runs the two in sequence
 
 ```
@@ -195,8 +210,8 @@ Weekly ─► Run ingest ─► Run report
 ```
 
 `Triage analytics — sync and report` syncs the store and then publishes a report
-from it, in one execution. It holds no logic of its own — three nodes, two of
-which are Execute Workflow calls.
+from it, in one execution. It holds no logic of its own — three functional
+nodes, two of which are Execute Workflow calls, plus one sticky note.
 
 The ingest and the report are callable because each now carries a **second
 trigger**: an Execute Workflow Trigger (typeVersion 1.2, `inputSource:
@@ -287,7 +302,7 @@ population}` so every table can print the denominator it actually used.
 
 ## What the tests are for
 
-190 tests, and the number is not the point. Partway through, a mutation review
+195 tests, and the number is not the point. Partway through, a mutation review
 seeded 17 deliberate bugs into a suite of 42 passing tests. **14 of them
 survived with the suite fully green** — including deleting the `mergedAt`
 filter, the single most load-bearing rule in the codebase.
@@ -314,6 +329,13 @@ emitted; either node version changed; `mode` changed to `each`; `source` changed
 to `parameter`; `inputSource` changed off `passthrough`; the trigger replaced by
 a NoOp; a Schedule Trigger deleted; the cadence moved to daily; the ordering
 note stripped; and `orchestrator.json` dropped from the build.
+
+The sticky notes were held to the same standard. Seven mutations were applied
+and every one turned the suite red: a note deleted; a distinctive phrase blunted
+into a generality; the `2.86 MB` and `5,464` figures removed; a note moved on
+top of a functional node; a note moved on top of another note; a note wired into
+the orchestrator chain as a connection target; and a note given an outgoing
+connection key of its own.
 
 Fixtures are 10 real records pulled from the live API plus 3 synthetic ones
 (numbers `9000xx`) covering branches real data does not exercise. Assertions are

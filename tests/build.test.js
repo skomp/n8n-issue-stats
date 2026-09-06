@@ -44,6 +44,14 @@ const fixtureState = records => JSON.stringify({
 const page = nodes => ({ data: { rateLimit: { cost: 1, remaining: 4999 }, repository: { issues: { pageInfo: { hasNextPage: false, endCursor: 'Y3Vyc29y' }, nodes } } } });
 
 const nodeNamed = (workflow, name) => workflow.nodes.find(n => n.name === name);
+
+// Sticky notes are nodes in the JSON but not in the graph: no connections, no
+// runtime behaviour, no credentials. Every assertion about "the nodes" has to
+// say which of the two it means, or adding documentation changes a count that
+// was measuring logic.
+const STICKY_TYPE = 'n8n-nodes-base.stickyNote';
+const stickiesOf = workflow => workflow.nodes.filter(n => n.type === STICKY_TYPE);
+const functionalNodes = workflow => workflow.nodes.filter(n => n.type !== STICKY_TYPE);
 const acceptOf = node => node.parameters.headerParameters.parameters.find(h => h.name === 'Accept')?.value;
 
 // Runs a generated Code node's jsCode the way n8n does: a bare function body
@@ -467,6 +475,7 @@ test('every generated node type version matches NODE_TYPE_VERSIONS', () => {
     'n8n-nodes-base.merge': 3.2,
     'n8n-nodes-base.executeWorkflow': 1.3,
     'n8n-nodes-base.executeWorkflowTrigger': 1.2,
+    'n8n-nodes-base.stickyNote': 1,
   });
   for (const build of [buildIngestWorkflow, buildReportWorkflow, buildOrchestratorWorkflow]) {
     for (const node of build().nodes) {
@@ -1176,9 +1185,12 @@ test('the orchestrator matches the report cadence it replaces', () => {
   assert.deepEqual(trigger.parameters.rule.interval,
     nodeNamed(buildReportWorkflow(), 'Weekly').parameters.rule.interval);
 
-  // Three nodes, no more. An orchestrator that grew logic of its own would be
-  // duplicating what the sub-workflows already do.
-  assert.deepEqual(orchestrator.nodes.map(n => n.name), ['Weekly', 'Run ingest', 'Run report']);
+  // Three FUNCTIONAL nodes, no more. An orchestrator that grew logic of its own
+  // would be duplicating what the sub-workflows already do. Sticky notes are
+  // excluded on purpose: they are canvas annotations with no connections and no
+  // runtime behaviour, so counting them here would make documentation look like
+  // logic. `stickiesOf` asserts the rest of what they must be.
+  assert.deepEqual(functionalNodes(orchestrator).map(n => n.name), ['Weekly', 'Run ingest', 'Run report']);
 });
 
 test('the second Execute Workflow node explains why it must not start early', () => {
@@ -1195,6 +1207,167 @@ test('the second Execute Workflow node explains why it must not start early', ()
 test('the build emits exactly three workflow files', () => {
   assert.deepEqual(GENERATED_WORKFLOWS.map(([file]) => file),
     ['ingest.json', 'report.json', 'orchestrator.json']);
+});
+
+// --- Sticky notes: the canvas documentation ---------------------------------
+//
+// The notes exist because the canvas shows WHAT each node is called and never
+// WHY the graph has this shape. Three properties have to hold or they stop
+// doing that job:
+//
+//   the right notes are there   — one per phase, not one per node, and none
+//                                 quietly deleted by a later edit;
+//   they say something specific — each carries the fact that phase turns on,
+//                                 so a note cannot decay into a node name;
+//   they do not hide the graph  — a note dropped on a node covers it, and a
+//                                 covered node is worse than an undocumented
+//                                 one.
+//
+// Literals on purpose throughout, as everywhere else in this file.
+
+// How much canvas a functional node occupies, measured from its `position`
+// (which is its TOP-LEFT corner, the same anchor a sticky note uses). n8n
+// draws a standard node as a 100 x 100 box.
+const NODE_BOX = 100;
+
+const rectOf = node => (node.type === STICKY_TYPE
+  ? [node.position[0], node.position[1],
+    node.position[0] + node.parameters.width, node.position[1] + node.parameters.height]
+  : [node.position[0], node.position[1],
+    node.position[0] + NODE_BOX, node.position[1] + NODE_BOX]);
+
+const overlaps = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+
+// One entry per sticky note, and the phrase that ties it to its phase. A note
+// that no longer carries its phrase has been reduced to a restatement of the
+// node names beside it, which is the failure this whole section guards.
+const STICKY_PHRASES = [
+  [buildIngestWorkflow, [
+    /fans out to BOTH branches/,
+    /5-minute overlap/,
+    /application\/vnd\.github\.raw/,
+    /waitForAll/,
+    /90% of the count/,
+  ]],
+  [buildReportWorkflow, [
+    /execute an identical graph/,
+    /one item per issue is the out-of-memory failure/,
+    /404 means the file does not exist yet/,
+    /skomp\.github\.io\/n8n-reports/,
+  ]],
+  [buildOrchestratorWorkflow, [
+    /waitForSubWorkflow/,
+  ]],
+];
+
+test('every canvas carries one sticky note per phase, and no more', () => {
+  // Counts, written out. One note per NODE would restate the node names the
+  // canvas already draws; a note that goes missing takes its phase's reason
+  // with it and nothing else notices.
+  const counts = new Map([
+    [buildIngestWorkflow, 5],
+    [buildReportWorkflow, 4],
+    [buildOrchestratorWorkflow, 1],
+  ]);
+  for (const [build, expected] of counts) {
+    const workflow = build();
+    assert.equal(stickiesOf(workflow).length, expected,
+      `${workflow.name} should carry ${expected} sticky note(s)`);
+    for (const sticky of stickiesOf(workflow)) {
+      assert.equal(sticky.type, 'n8n-nodes-base.stickyNote');
+      assert.equal(sticky.typeVersion, 1, 'verified against the live instance');
+      assert.equal(typeof sticky.parameters.content, 'string');
+      assert.ok(sticky.parameters.content.length > 0, `${sticky.name} is empty`);
+      assert.equal(typeof sticky.parameters.width, 'number');
+      assert.equal(typeof sticky.parameters.height, 'number');
+      assert.equal(typeof sticky.parameters.color, 'number');
+    }
+  }
+});
+
+test('every sticky note carries the fact its phase turns on', () => {
+  for (const [build, phrases] of STICKY_PHRASES) {
+    const workflow = build();
+    const contents = stickiesOf(workflow).map(n => n.parameters.content);
+    assert.equal(phrases.length, contents.length,
+      `${workflow.name}: every sticky note needs a phrase that identifies it`);
+
+    // Each phrase must match EXACTLY ONE note. Matching several would mean two
+    // notes documenting the same thing; matching none means a note has lost
+    // the reason it was written for.
+    for (const phrase of phrases) {
+      const matched = contents.filter(c => phrase.test(c));
+      assert.equal(matched.length, 1,
+        `${workflow.name}: ${phrase} should appear in exactly one sticky note, found ${matched.length}`);
+    }
+    // And every note must be claimed by some phrase, so a note cannot be added
+    // or rewritten without saying what it is for.
+    for (const content of contents) {
+      assert.ok(phrases.some(p => p.test(content)),
+        `${workflow.name}: a sticky note matches none of the expected phrases:\n${content}`);
+    }
+  }
+});
+
+test('the sticky notes carry the measured numbers, not vague warnings', () => {
+  // The numbers are what make the notes actionable: a reader who knows the
+  // store is 2.86 MB understands the 1 MB truncation instantly.
+  const ingestText = stickiesOf(buildIngestWorkflow()).map(n => n.parameters.content).join('\n');
+  assert.match(ingestText, /2\.86 MB/);
+  assert.match(ingestText, /1 MB/);
+  assert.match(ingestText, /90%/);
+
+  const reportText = stickiesOf(buildReportWorkflow()).map(n => n.parameters.content).join('\n');
+  assert.match(reportText, /5,464/);
+  assert.match(reportText, /180-day/);
+});
+
+test('no sticky note covers a functional node or another sticky note', () => {
+  // A note drawn over a node hides it. n8n gives no warning and the workflow
+  // still runs, so nothing but this test would catch it.
+  for (const build of [buildIngestWorkflow, buildReportWorkflow, buildOrchestratorWorkflow]) {
+    const workflow = build();
+    const stickies = stickiesOf(workflow);
+    for (const sticky of stickies) {
+      for (const node of functionalNodes(workflow)) {
+        assert.ok(!overlaps(rectOf(sticky), rectOf(node)),
+          `${workflow.name}: "${sticky.name}" covers the node "${node.name}"`);
+      }
+    }
+    for (let i = 0; i < stickies.length; i += 1) {
+      for (let j = i + 1; j < stickies.length; j += 1) {
+        assert.ok(!overlaps(rectOf(stickies[i]), rectOf(stickies[j])),
+          `${workflow.name}: "${stickies[i].name}" overlaps "${stickies[j].name}"`);
+      }
+    }
+  }
+});
+
+test('sticky notes are annotations, never part of the graph', () => {
+  // A sticky note has no inputs and no outputs. Wiring one in would break the
+  // chain it was wired into, so the connections must not mention it at all --
+  // neither as a source key nor as a target.
+  for (const build of [buildIngestWorkflow, buildReportWorkflow, buildOrchestratorWorkflow]) {
+    const workflow = build();
+    const names = new Set(stickiesOf(workflow).map(n => n.name));
+    assert.ok(names.size > 0);
+    for (const name of names) {
+      assert.ok(!(name in workflow.connections),
+        `${workflow.name}: "${name}" is a connection SOURCE`);
+    }
+    for (const [from, connection] of Object.entries(workflow.connections)) {
+      for (const output of connection.main) {
+        for (const edge of output) {
+          assert.ok(!names.has(edge.node),
+            `${workflow.name}: "${from}" connects to the sticky note "${edge.node}"`);
+        }
+      }
+    }
+    // And they carry no credentials -- a sticky note makes no request.
+    for (const sticky of stickiesOf(workflow)) {
+      assert.ok(!('credentials' in sticky), `${sticky.name} carries credentials`);
+    }
+  }
 });
 
 // --- The committed files ----------------------------------------------------

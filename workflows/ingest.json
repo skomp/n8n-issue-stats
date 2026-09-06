@@ -311,6 +311,81 @@
       },
       "notes": "Runs AFTER the store write, deliberately. If the store write fails the watermark is not advanced and the next run re-fetches the same window; the reverse order would leave a permanent gap.",
       "notesInFlow": false
+    },
+    {
+      "name": "Note: two ways in",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -320,
+        0
+      ],
+      "parameters": {
+        "content": "**Two ways in**\n\nThe daily schedule and the orchestrator both start this workflow. n8n fires each trigger as its own isolated execution, and each one fans out to BOTH branches: the fetch and the store download. A trigger wired to only one branch runs half the workflow and still reports success.",
+        "height": 440,
+        "width": 280,
+        "color": 7
+      }
+    },
+    {
+      "name": "Note: incremental fetch",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        200,
+        -420
+      ],
+      "parameters": {
+        "content": "**Fetch only what changed**\n\nThe watermark in state.json sets the window, minus a 5-minute overlap. Duplicates are cheap because the upsert is keyed on issue number; a gap is silent and permanent. GraphQL with cursor pagination, ascending by updatedAt: descending has a documented race where records shift between pages mid-crawl.",
+        "height": 240,
+        "width": 600,
+        "color": 5
+      }
+    },
+    {
+      "name": "Note: reading the store intact",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "content": "**Read the store intact**\n\n`Accept: application/vnd.github.raw` is mandatory. The Contents API returns HTTP 200 with an EMPTY content field for files over 1 MB, and the store is 2.86 MB. Without it the store reads as empty, and the write at the end of this chain would destroy it.",
+        "height": 240,
+        "width": 400,
+        "color": 3
+      }
+    },
+    {
+      "name": "Note: the barrier",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        840,
+        -320
+      ],
+      "parameters": {
+        "content": "**A barrier, not a data join**\n\nchooseBranch / waitForAll / output: empty. It waits for both branches and deliberately passes no data, so the 2.86 MB store is never copied into the memory of a second node. \"Upsert store\" reads both branches by node name.",
+        "height": 240,
+        "width": 400,
+        "color": 6
+      }
+    },
+    {
+      "name": "Note: writing back",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1080,
+        200
+      ],
+      "parameters": {
+        "content": "**Upsert, then write back**\n\nFetched issues merge into the store by issue number. The store is written with the blob sha read earlier, and the watermark last, so a failed store write leaves the window to be re-fetched. A guard refuses to write a store smaller than 90% of the count recorded in state.json.",
+        "height": 220,
+        "width": 620,
+        "color": 4
+      }
     }
   ],
   "connections": {

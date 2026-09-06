@@ -328,6 +328,66 @@
       },
       "notes": "Overwrites the same path every week, so from run two onward it always carries a sha. Runs LAST, deliberately: if a dated write fails, index.html is not left pointing at a report that is missing from the archive.",
       "notesInFlow": false
+    },
+    {
+      "name": "Note: two ways in",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -320,
+        0
+      ],
+      "parameters": {
+        "content": "**Two ways in**\n\nThe weekly schedule and the orchestrator both start this workflow. n8n fires each trigger as its own isolated execution, and both start the same first node, so an orchestrated run and a scheduled run execute an identical graph.",
+        "height": 300,
+        "width": 280,
+        "color": 7
+      }
+    },
+    {
+      "name": "Note: one item in, one item out",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        200,
+        -300
+      ],
+      "parameters": {
+        "content": "**One item in, one item out**\n\nn8n holds every node output array in memory for the whole execution. The store holds 5,464 issues, and one item per issue is the out-of-memory failure this project exists to avoid.\n\nIntake figures use a 180-day window; lead times use all history. Windowing a duration by creation date truncates the slow tail and halves the median.",
+        "height": 260,
+        "width": 440,
+        "color": 3
+      }
+    },
+    {
+      "name": "Note: read the sha first",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        660,
+        -300
+      ],
+      "parameters": {
+        "content": "**Read the sha before every write**\n\nEvery write looks up its own blob sha first. A 404 means the file does not exist yet, which is not an error: the sha is simply omitted and the write creates the file. That is what makes a same-day re-run safe.",
+        "height": 260,
+        "width": 780,
+        "color": 5
+      }
+    },
+    {
+      "name": "Note: three files per run",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1460,
+        -300
+      ],
+      "parameters": {
+        "content": "**Three files, one render**\n\nMarkdown for the archive, HTML for reading, and index.html as the copy the Pages site serves. index.html is written last, so it never points at a report the archive does not hold.\n\nhttps://skomp.github.io/n8n-reports/",
+        "height": 260,
+        "width": 620,
+        "color": 4
+      }
     }
   ],
   "connections": {

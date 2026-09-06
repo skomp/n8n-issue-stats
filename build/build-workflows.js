@@ -460,6 +460,7 @@ export const NODE_TYPE_VERSIONS = {
   'n8n-nodes-base.merge': 3.2,
   'n8n-nodes-base.executeWorkflow': 1.3,
   'n8n-nodes-base.executeWorkflowTrigger': 1.2,
+  'n8n-nodes-base.stickyNote': 1,
 };
 
 // The two sub-workflows, by the id they already carry on the instance. The
@@ -705,6 +706,34 @@ function executeWorkflowNode({ name, position, target, notes }) {
     },
     notes,
     notesInFlow: false,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Sticky notes — canvas documentation
+// ---------------------------------------------------------------------------
+//
+// A sticky note is a NODE with no connections: n8n renders it as a coloured
+// rectangle behind the graph, positioned by the same coordinate system the
+// functional nodes use. typeVersion 1, verified against the live instance.
+//
+// They are grouped BY PHASE, never one per node. A note per node would restate
+// the node name, which the canvas already shows; the thing a reader cannot get
+// from the canvas is why the graph has this shape — why two branches, why a
+// barrier, why an extra media type, why the writes are ordered.
+//
+// Position is the note's TOP-LEFT corner and width/height are its extent, so a
+// note occupies [x, x + width] x [y, y + height]. Every note here is placed in
+// empty canvas beside or above the group it describes; tests/build.test.js
+// asserts that none of them covers a functional node or another note, because
+// a note dropped on top of a node hides the node.
+function stickyNoteNode({ name, position, width, height, color, content }) {
+  return {
+    name,
+    type: 'n8n-nodes-base.stickyNote',
+    typeVersion: NODE_TYPE_VERSIONS['n8n-nodes-base.stickyNote'],
+    position,
+    parameters: { content, height, width, color },
   };
 }
 
@@ -1039,6 +1068,85 @@ export function buildIngestWorkflow() {
         'advanced and the next run re-fetches the same window; the reverse order would leave a ' +
         'permanent gap.',
     }),
+
+    // --- Canvas documentation, one note per PHASE -------------------------
+    //
+    // Laid out in the empty canvas around the graph: the trigger note to the
+    // left of both triggers, the fetch note above its branch, the store note
+    // below its branch, and the two tail notes above and below the tail.
+    stickyNoteNode({
+      name: 'Note: two ways in',
+      position: [-320, 0],
+      width: 280,
+      height: 440,
+      color: 7,
+      content: [
+        '**Two ways in**',
+        '',
+        'The daily schedule and the orchestrator both start this workflow. n8n fires each trigger ' +
+        'as its own isolated execution, and each one fans out to BOTH branches: the fetch and the ' +
+        'store download. A trigger wired to only one branch runs half the workflow and still ' +
+        'reports success.',
+      ].join('\n'),
+    }),
+    stickyNoteNode({
+      name: 'Note: incremental fetch',
+      position: [200, -420],
+      width: 600,
+      height: 240,
+      color: 5,
+      content: [
+        '**Fetch only what changed**',
+        '',
+        'The watermark in state.json sets the window, minus a 5-minute overlap. Duplicates are ' +
+        'cheap because the upsert is keyed on issue number; a gap is silent and permanent. ' +
+        'GraphQL with cursor pagination, ascending by updatedAt: descending has a documented race ' +
+        'where records shift between pages mid-crawl.',
+      ].join('\n'),
+    }),
+    stickyNoteNode({
+      name: 'Note: reading the store intact',
+      position: [200, 300],
+      width: 400,
+      height: 240,
+      color: 3,
+      content: [
+        '**Read the store intact**',
+        '',
+        '`Accept: application/vnd.github.raw` is mandatory. The Contents API returns HTTP 200 with ' +
+        'an EMPTY content field for files over 1 MB, and the store is 2.86 MB. Without it the ' +
+        'store reads as empty, and the write at the end of this chain would destroy it.',
+      ].join('\n'),
+    }),
+    stickyNoteNode({
+      name: 'Note: the barrier',
+      position: [840, -320],
+      width: 400,
+      height: 240,
+      color: 6,
+      content: [
+        '**A barrier, not a data join**',
+        '',
+        'chooseBranch / waitForAll / output: empty. It waits for both branches and deliberately ' +
+        'passes no data, so the 2.86 MB store is never copied into the memory of a second node. ' +
+        '"Upsert store" reads both branches by node name.',
+      ].join('\n'),
+    }),
+    stickyNoteNode({
+      name: 'Note: writing back',
+      position: [1080, 200],
+      width: 620,
+      height: 220,
+      color: 4,
+      content: [
+        '**Upsert, then write back**',
+        '',
+        'Fetched issues merge into the store by issue number. The store is written with the blob ' +
+        'sha read earlier, and the watermark last, so a failed store write leaves the window to be ' +
+        're-fetched. A guard refuses to write a store smaller than 90% of the count recorded in ' +
+        'state.json.',
+      ].join('\n'),
+    }),
   ];
 
   // TWO CONCURRENT BRANCHES, joined by a barrier.
@@ -1186,6 +1294,73 @@ export function buildReportWorkflow() {
         'Runs LAST, deliberately: if a dated write fails, index.html is not left pointing at a ' +
         'report that is missing from the archive.',
     }),
+
+    // --- Canvas documentation, one note per PHASE -------------------------
+    //
+    // The graph is one straight line at y = 0, so every note sits in the empty
+    // band above it, tiled left to right over the group it describes. The
+    // trigger note is to the left of both triggers.
+    stickyNoteNode({
+      name: 'Note: two ways in',
+      position: [-320, 0],
+      width: 280,
+      height: 300,
+      color: 7,
+      content: [
+        '**Two ways in**',
+        '',
+        'The weekly schedule and the orchestrator both start this workflow. n8n fires each trigger ' +
+        'as its own isolated execution, and both start the same first node, so an orchestrated run ' +
+        'and a scheduled run execute an identical graph.',
+      ].join('\n'),
+    }),
+    stickyNoteNode({
+      name: 'Note: one item in, one item out',
+      position: [200, -300],
+      width: 440,
+      height: 260,
+      color: 3,
+      content: [
+        '**One item in, one item out**',
+        '',
+        'n8n holds every node output array in memory for the whole execution. The store holds ' +
+        '5,464 issues, and one item per issue is the out-of-memory failure this project exists to ' +
+        'avoid.',
+        '',
+        'Intake figures use a 180-day window; lead times use all history. Windowing a duration by ' +
+        'creation date truncates the slow tail and halves the median.',
+      ].join('\n'),
+    }),
+    stickyNoteNode({
+      name: 'Note: read the sha first',
+      position: [660, -300],
+      width: 780,
+      height: 260,
+      color: 5,
+      content: [
+        '**Read the sha before every write**',
+        '',
+        'Every write looks up its own blob sha first. A 404 means the file does not exist yet, ' +
+        'which is not an error: the sha is simply omitted and the write creates the file. That is ' +
+        'what makes a same-day re-run safe.',
+      ].join('\n'),
+    }),
+    stickyNoteNode({
+      name: 'Note: three files per run',
+      position: [1460, -300],
+      width: 620,
+      height: 260,
+      color: 4,
+      content: [
+        '**Three files, one render**',
+        '',
+        'Markdown for the archive, HTML for reading, and index.html as the copy the Pages site ' +
+        'serves. index.html is written last, so it never points at a report the archive does not ' +
+        'hold.',
+        '',
+        'https://skomp.github.io/n8n-reports/',
+      ].join('\n'),
+    }),
   ];
 
   // Every sha read happens BEFORE any write. The reads only need "Rollup and
@@ -1258,6 +1433,27 @@ export function buildOrchestratorWorkflow() {
         'the order: this node is downstream of "Run ingest" on the wire, and "Run ingest" sets ' +
         'options.waitForSubWorkflow explicitly, so it blocks until the ingest sub-execution ends ' +
         'instead of firing it and continuing.',
+    }),
+
+    // --- Canvas documentation ---------------------------------------------
+    //
+    // One note. This workflow is two boxes in a row, and both orders draw the
+    // same picture, so the note is the only place the canvas says which order
+    // is correct and what the wrong one costs.
+    stickyNoteNode({
+      name: 'Note: why the order is enforced',
+      position: [0, -300],
+      width: 640,
+      height: 240,
+      color: 3,
+      content: [
+        '**The order is the whole point**',
+        '',
+        'The report renders from issues.ndjson, which the ingest rewrites. Started early it ' +
+        'publishes a report over stale data: nothing fails, the run is green, and the only symptom ' +
+        'is a report quietly a week behind. "Run ingest" sets waitForSubWorkflow explicitly for ' +
+        'that reason.',
+      ].join('\n'),
     }),
   ];
 
