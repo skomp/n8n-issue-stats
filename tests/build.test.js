@@ -25,7 +25,7 @@ import { ISSUES_QUERY } from '../src/lib/github.js';
 import { ALL_FILTER_LABELS } from '../src/lib/labels.js';
 
 const fixtureText = readFileSync('tests/fixtures/issues.sample.ndjson', 'utf8');
-const FIXTURE_RECORDS = 13;
+const FIXTURE_RECORDS = 14;
 
 const b64 = s => Buffer.from(s, 'utf8').toString('base64');
 
@@ -308,9 +308,9 @@ test('applyPages refuses a truncated store read before producing any write paylo
 test('applyPages refuses a store that shrank against the recorded count', () => {
   assert.throws(() => applyPages({
     storeText: fixtureText,
-    stateText: realStateText, // records: 5464, but only 13 arrived
+    stateText: realStateText, // records: 5464, but only 14 arrived
     pages: [page([])],
-  }), /read back 13 record\(s\) but state\.json records 5464/);
+  }), /read back 14 record\(s\) but state\.json records 5464/);
 });
 
 // --- Report payload: the memory-safety contract, checked by value -----------
@@ -320,8 +320,8 @@ test('buildReportPayload folds the whole store into a single object, not an arra
   assert.equal(Array.isArray(payload), false);
   assert.equal(typeof payload.content, 'string');
   assert.equal(payload.path, 'reports/2026-09-06-triage.md');
-  // Value check, not shape check: the fixture's known population (13 records).
-  assert.match(payload.content, /Population: \*\*13\*\*/);
+  // Value check, not shape check: the fixture's known population (14 records).
+  assert.match(payload.content, /Population: \*\*14\*\*/);
 });
 
 test('buildReportPayload anchors the intake window to the report timestamp, not the clock', () => {
@@ -330,13 +330,13 @@ test('buildReportPayload anchors the intake window to the report timestamp, not 
   // catches rollup() being called without `now`.
   const early = buildReportPayload(fixtureText, '2026-05-01T00:00:00.000Z');
   assert.match(early.content, /180 days since 2025-11-02/);
-  // 6 of the 13 fixture issues were created on or after 2025-11-02.
-  assert.match(early.content, /\*\*6\*\* of the 13 triaged issues/);
+  // 6 of the 14 fixture issues were created on or after 2025-11-02.
+  assert.match(early.content, /\*\*6\*\* of the 14 triaged issues/);
 
   const late = buildReportPayload(fixtureText, '2026-09-06T00:00:00.000Z');
   assert.match(late.content, /180 days since 2026-03-10/);
-  // None of the 13 were created on or after 2026-03-10.
-  assert.match(late.content, /\*\*0\*\* of the 13 triaged issues/);
+  // None of the 14 were created on or after 2026-03-10.
+  assert.match(late.content, /\*\*0\*\* of the 14 triaged issues/);
 });
 
 test('buildReportPayload refuses a truncated store rather than publishing "Population: 0"', () => {
@@ -544,7 +544,7 @@ test('the generated "Rollup and render" node reads raw text and returns ONE item
   assert.equal(out.length, 1, 'the report must never be emitted as one item per issue');
   assert.match(out[0].json.path, /^reports\/\d{4}-\d{2}-\d{2}-triage\.md$/);
   const md = Buffer.from(out[0].json.content, 'base64').toString('utf8');
-  assert.match(md, /Population: \*\*13\*\*/);
+  assert.match(md, /Population: \*\*14\*\*/);
 });
 
 test('the generated "Rollup and render" node fails on a truncated store read', () => {
@@ -647,11 +647,11 @@ test('"Upsert store" still reaches state.json across the branch split', () => {
     items: [{ json: {} }],
     nodes: {
       'Fetch issues': [page([])],
-      'Read issues.ndjson': { data: fixtureText },   // 13 records
+      'Read issues.ndjson': { data: fixtureText },   // 14 records
       'Read issues.ndjson sha': { sha: 'storesha' },
       'Read state.json': { content: b64(realStateText), sha: 'statesha' }, // records: 5464
     },
-  }), /read back 13 record\(s\) but state\.json records 5464/);
+  }), /read back 14 record\(s\) but state\.json records 5464/);
 });
 
 // --- Every write is an upsert: send the sha only when the read returned one --
@@ -767,8 +767,8 @@ test('buildReportPayload renders markdown and HTML from one rollup, plus the ind
   assert.equal(payload.htmlPath, 'reports/2026-09-06-triage.html');
   assert.equal(payload.indexPath, 'index.html');
   // Value checks: the same population must appear in BOTH renderings.
-  assert.match(payload.content, /Population: \*\*13\*\*/);
-  assert.match(payload.htmlContent, /class="figure"><strong>13<\/strong>/);
+  assert.match(payload.content, /Population: \*\*14\*\*/);
+  assert.match(payload.htmlContent, /class="figure"><strong>14<\/strong>/);
 });
 
 test('both renderings are anchored to the SAME report timestamp', () => {
@@ -779,14 +779,14 @@ test('both renderings are anchored to the SAME report timestamp', () => {
   const early = buildReportPayload(fixtureText, '2026-05-01T00:00:00.000Z');
   assert.match(early.content, /180 days since 2025-11-02/);
   assert.match(early.htmlContent, /180 days since 2025-11-02/);
-  // 6 of the 13 fixture issues were created on or after 2025-11-02.
-  assert.match(early.content, /\*\*6\*\* of the 13 triaged issues/);
-  assert.match(early.htmlContent, /<strong>6<\/strong> of the 13 triaged issues/);
+  // 6 of the 14 fixture issues were created on or after 2025-11-02.
+  assert.match(early.content, /\*\*6\*\* of the 14 triaged issues/);
+  assert.match(early.htmlContent, /<strong>6<\/strong> of the 14 triaged issues/);
   assert.match(early.htmlContent, /<title>n8n triage report — 2026-05-01<\/title>/);
 
   const late = buildReportPayload(fixtureText, '2026-09-06T00:00:00.000Z');
-  assert.match(late.content, /\*\*0\*\* of the 13 triaged issues/);
-  assert.match(late.htmlContent, /<strong>0<\/strong> of the 13 triaged issues/);
+  assert.match(late.content, /\*\*0\*\* of the 14 triaged issues/);
+  assert.match(late.htmlContent, /<strong>0<\/strong> of the 14 triaged issues/);
   assert.match(late.htmlContent, /<title>n8n triage report — 2026-09-06<\/title>/);
 });
 
@@ -958,9 +958,9 @@ test('the generated "Rollup and render" node emits all three files as ONE item',
   // Decoded VALUES, not the presence of a field.
   const html = Buffer.from(j.htmlContent, 'base64').toString('utf8');
   assert.match(html, /^<!doctype html>/);
-  assert.match(html, /class="figure"><strong>13<\/strong>/);
+  assert.match(html, /class="figure"><strong>14<\/strong>/);
   const md = Buffer.from(j.content, 'base64').toString('utf8');
-  assert.match(md, /Population: \*\*13\*\*/);
+  assert.match(md, /Population: \*\*14\*\*/);
 });
 
 // --- Sub-workflow triggers and the orchestrator ------------------------------

@@ -6,7 +6,7 @@ import { parseStore, serialiseStore, upsert, watermarkOf } from '../src/lib/stor
 const text = readFileSync('tests/fixtures/issues.sample.ndjson', 'utf8');
 
 test('parses every fixture record', () => {
-  assert.equal(parseStore(text).size, 13);
+  assert.equal(parseStore(text).size, 14);
 });
 
 // I7: the old assertion compared only KEYS, so rewriting serialiseStore to emit
@@ -37,7 +37,7 @@ test('serialises ascending by issue number and ends with a newline', () => {
 });
 
 test('tolerates blank lines and trailing whitespace', () => {
-  assert.equal(parseStore('\n' + text + '\n\n').size, 13);
+  assert.equal(parseStore('\n' + text + '\n\n').size, 14);
 });
 
 // The incremental sync deliberately re-fetches an overlapping window.

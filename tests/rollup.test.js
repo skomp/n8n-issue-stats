@@ -8,8 +8,9 @@ const issues = readFileSync('tests/fixtures/issues.sample.ndjson', 'utf8')
 const round1 = n => n == null ? null : Math.round(n * 10) / 10;
 
 // The fixture's records run from 2025-06-05 to 2026-03-01. A 440-day window
-// ending 2026-09-06 opens on 2025-06-23, which SPLITS the fixture: the two
-// June 2025 records (#16038, #16207) fall outside it and the other eleven inside.
+// ending 2026-09-06 opens on 2025-06-23, which SPLITS the fixture: the three
+// June 2025 records (#16038, #16207, #900004) fall outside it and the other
+// eleven inside.
 // The split is deliberate — it is what stops a windowed count and an all-time
 // count from being equal by accident, which is how a dropped window would
 // otherwise pass unnoticed.
@@ -17,9 +18,10 @@ const NOW = new Date('2026-09-06T10:00:00Z');
 const WINDOW = { now: NOW, windowDays: 440 };
 const r = rollup(issues, WINDOW);
 
-// The fixture holds 10 real records plus the synthetic 900001, 900002, 900003.
+// The fixture holds 10 real records plus the synthetic 900001, 900002, 900003,
+// 900004.
 test('total is the FULL population, the window is reported beside it', () => {
-  assert.equal(r.total, 13);
+  assert.equal(r.total, 14);
   assert.deepEqual(r.window, {
     since: '2025-06-23T10:00:00.000Z',
     days: 440,
@@ -34,8 +36,9 @@ test('segments partition the WINDOWED population exactly', () => {
   assert.equal(r.segments.accepted + r.segments.rejected, r.window.population);
 });
 
-// The two records outside the window are #16038 (team:nodes) and #16207
-// (team:payday), so their components must be absent, not merely smaller.
+// The three records outside the window are #16038 (team:nodes), #16207
+// (team:payday) and #900004 (team:nodes), so their components must be absent,
+// not merely smaller.
 test('component counts cover the windowed accepted segment and nothing else', () => {
   const summed = Object.values(r.components).reduce((a, b) => a + b, 0);
   assert.equal(summed, r.segments.accepted);
@@ -69,7 +72,7 @@ test('the headline counts windowed and all-time issues that should never have be
   assert.equal(r.headline.shouldNotHaveBeenFiled, 1);
   assert.equal(r.headline.shareOfPopulation, 1 / 11);
   assert.equal(r.headline.allTime.shouldNotHaveBeenFiled, 1);
-  assert.equal(r.headline.allTime.shareOfPopulation, 1 / 13);
+  assert.equal(r.headline.allTime.shareOfPopulation, 1 / 14);
   assert.notEqual(r.headline.shareOfPopulation, r.headline.allTime.shareOfPopulation);
 });
 
@@ -127,17 +130,22 @@ test('two windowed fixtures carry no triage label at all', () => {
 // I5: `assert.ok(median > 0)` held for almost any wrong number — feeding `fix`
 // from closeDays instead of fixDays published the wrong statistic and passed.
 test('lead times are summarised by their actual median and p90', () => {
+  // Seven fix lead times, decoded by hand and sorted:
+  //   2.91, 6.38, 8.60, 15.39, 22.73, 30.40 (#900004), 114.81
+  // Median is the 4th of seven; p90 is nearest-rank ceil(7 * 0.9) = 7th.
   assert.deepEqual(
     { median: round1(r.leadTimes.fix.median), p90: round1(r.leadTimes.fix.p90), n: r.leadTimes.fix.n },
-    { median: 12, p90: 114.8, n: 6 }
+    { median: 15.4, p90: 114.8, n: 7 }
   );
   assert.deepEqual(
     { median: round1(r.leadTimes.close.median), p90: round1(r.leadTimes.close.p90), n: r.leadTimes.close.n },
     { median: 5, p90: 35.5, n: 12 }
   );
+  // Seven PR lead times, sorted:
+  //   0.88, 2.76, 3.63, 6.60, 22.25, 25.40 (#900004), 86.99
   assert.deepEqual(
     { median: round1(r.leadTimes.pr.median), p90: round1(r.leadTimes.pr.p90), n: r.leadTimes.pr.n },
-    { median: 5.1, p90: 87, n: 6 }
+    { median: 6.6, p90: 87, n: 7 }
   );
 });
 
@@ -145,7 +153,8 @@ test('lead times are summarised by their actual median and p90', () => {
 // understate the median fix time by 2x on the real store (25.3 days over all
 // history, 12.7 days windowed) through truncation bias. `close.n` counts every
 // closed issue in the store, so it must stay at the ALL-TIME figure even
-// though the window admits only 11 of the 13 records.
+// though the window admits only 11 of the 14 records. #900004 is still OPEN,
+// so it contributes to fix and pr but not to close.
 test('lead times cover all history, never the window', () => {
   assert.equal(r.leadTimes.close.n, 12);
   assert.ok(r.leadTimes.close.n > r.window.population);
@@ -182,7 +191,7 @@ test('rollup(issues) with no options defaults to a 180-day window ending now', (
     `since ${d.window.since} is not 180 days before now`);
 
   // Defaults change the window, never the full population or the lead times.
-  assert.equal(d.total, 13);
+  assert.equal(d.total, 14);
   assert.equal(d.leadTimes.close.n, 12);
 });
 

@@ -47,7 +47,7 @@ test('every required section is present as a heading, not as prose', () => {
 // I3: the old assertion was `md.includes('10')`, which matched the T10:00:00Z
 // in generatedAt. A report rendered from rollup([]) satisfied it.
 test('the population is printed as its actual count', () => {
-  assert.match(md, /^Population: \*\*13\*\* triaged issues/m);
+  assert.match(md, /^Population: \*\*14\*\* triaged issues/m);
   const empty = renderReport(rollup([], WINDOW), { generatedAt: '2026-09-06T10:00:00Z' });
   assert.match(empty, /^Population: \*\*0\*\* triaged issues/m);
   assert.notEqual(md.split('\n')[2], empty.split('\n')[2]);
@@ -67,12 +67,12 @@ test('every windowed table states the window it was computed over', () => {
 test('the lead-time section states that it is NOT windowed', () => {
   const lead = section('Lead times');
   assert.ok(!lead.includes(WINDOW_LINE), 'lead times must not claim the intake window');
-  assert.match(lead, /\*\*Not windowed — all 13 issues, all history\.\*\*/);
+  assert.match(lead, /\*\*Not windowed — all 14 issues, all history\.\*\*/);
 });
 
 test('the preamble states both denominators and the size of each', () => {
-  assert.match(md, /intake sections below cover the \*\*440 days since 2025-06-23\*\* — \*\*11\*\* of the 13 triaged issues/);
-  assert.match(md, /\*\*lead times cover all history\*\*, all 13 issues/);
+  assert.match(md, /intake sections below cover the \*\*440 days since 2025-06-23\*\* — \*\*11\*\* of the 14 triaged issues/);
+  assert.match(md, /\*\*lead times cover all history\*\*, all 14 issues/);
 });
 
 // I1 / spec section 8. The report previously buried its own stated headline
@@ -86,7 +86,7 @@ test('the headline states the accepted to rejected ratio for the window', () => 
 // finding, so both figures are published, never just the flattering one.
 test('the headline states the should-not-have-been-filed count for BOTH populations', () => {
   assert.match(md, /\*\*1\*\* issue \(\*\*9%\*\* of 11\) should never have been filed as a bug/);
-  assert.match(md, /Over all history the figure is \*\*1\*\* of 13 \(\*\*8%\*\*\)/);
+  assert.match(md, /Over all history the figure is \*\*1\*\* of 14 \(\*\*7%\*\*\)/);
 });
 
 test('the headline appears before the intake table, not after it', () => {
@@ -118,8 +118,9 @@ test('unclassified is shown as a table row, never silently dropped', () => {
   assert.match(md, /^\| unclassified \| 4 \|$/m);
 });
 
-// #16038 (team:nodes) and #16207 (team:payday) fall outside the window, so
-// their component rows must be absent — not merely smaller.
+// #16038 (team:nodes), #16207 (team:payday) and #900004 (team:nodes) fall
+// outside the window, so their component rows must be absent — not merely
+// smaller.
 test('component rows carry their actual counts and exclude out-of-window issues', () => {
   assert.match(md, /^\| packages\/nodes-base \| 3 \|$/m);
   assert.match(md, /^\| packages\/@n8n\/db \| 1 \|$/m);
@@ -161,8 +162,8 @@ test('the triage funnel says its rows are labels, so they need not sum', () => {
 // lead times being silently windowed: all three counts are over all history.
 test('each lead-time row carries its own median, p90 and n', () => {
   assert.match(md, /^\| Issue opened → closed \| 5 \| 35\.5 \| 12 \|$/m);
-  assert.match(md, /^\| Issue opened → fix merged \| 12 \| 114\.8 \| 6 \|$/m);
-  assert.match(md, /^\| Fix PR opened → merged \| 5\.1 \| 87 \| 6 \|$/m);
+  assert.match(md, /^\| Issue opened → fix merged \| 15\.4 \| 114\.8 \| 7 \|$/m);
+  assert.match(md, /^\| Fix PR opened → merged \| 6\.6 \| 87 \| 7 \|$/m);
 });
 
 // C2 + I2 + I4: emptying this table passed, and a transposed accepted/rejected
@@ -241,7 +242,7 @@ test('the HTML is a complete document with a title naming the report date', () =
 // --- The numbers, cell by cell ----------------------------------------------
 
 test('the HTML prints the population and the window population as figures', () => {
-  assert.match(html, /<span class="figure"><strong>13<\/strong><\/span> triaged issues from <code>n8n-io\/n8n<\/code>/);
+  assert.match(html, /<span class="figure"><strong>14<\/strong><\/span> triaged issues from <code>n8n-io\/n8n<\/code>/);
   // Emptying the store must change the rendered page, not just the title.
   const empty = renderHtml(rollup([], WINDOW), { generatedAt: '2026-09-06T10:00:00Z' });
   assert.match(empty, /<span class="figure"><strong>0<\/strong><\/span> triaged issues/);
@@ -250,8 +251,8 @@ test('the HTML prints the population and the window population as figures', () =
 
 test('the HTML carries the two-population explanation with both denominators', () => {
   assert.match(html, /<strong>This report uses two denominators, deliberately\.<\/strong>/);
-  assert.match(html, /cover the <strong>440 days since 2025-06-23<\/strong> — <strong>11<\/strong> of the 13 triaged issues/);
-  assert.match(html, /<strong>lead times cover all history<\/strong>, all 13 issues/);
+  assert.match(html, /cover the <strong>440 days since 2025-06-23<\/strong> — <strong>11<\/strong> of the 14 triaged issues/);
+  assert.match(html, /<strong>lead times cover all history<\/strong>, all 14 issues/);
 });
 
 test('the HTML headline states the ratio and both should-not-have-been-filed figures', () => {
@@ -259,7 +260,7 @@ test('the HTML headline states the ratio and both should-not-have-been-filed fig
   assert.match(headline, /In the 440 days since 2025-06-23: <strong>9 accepted<\/strong> to <strong>2 rejected<\/strong>/);
   assert.match(headline, /ratio of <strong>4\.50<\/strong> accepted issues per rejected issue, out of 11 issues created in the window/);
   assert.match(headline, /<strong>1<\/strong> issue \(<strong>9%<\/strong> of 11\) should never have been filed/);
-  assert.match(headline, /Over all history the figure is <strong>1<\/strong> of 13 \(<strong>8%<\/strong>\)/);
+  assert.match(headline, /Over all history the figure is <strong>1<\/strong> of 14 \(<strong>7%<\/strong>\)/);
 });
 
 test('HTML intake rows carry their counts and shares in the right cells', () => {
@@ -298,9 +299,9 @@ test('each HTML lead-time row carries its own median, p90 and n', () => {
   // the right label, and every "contains a number" test stays green.
   const lead = htmlSection('Lead times');
   assert.match(lead, /<tr><td>Issue opened → closed<\/td><td class="num">5<\/td><td class="num">35\.5<\/td><td class="num">12<\/td><\/tr>/);
-  assert.match(lead, /<tr><td>Issue opened → fix merged<\/td><td class="num">12<\/td><td class="num">114\.8<\/td><td class="num">6<\/td><\/tr>/);
-  assert.match(lead, /<tr><td>Fix PR opened → merged<\/td><td class="num">5\.1<\/td><td class="num">87<\/td><td class="num">6<\/td><\/tr>/);
-  assert.match(lead, /<strong>Not windowed — all 13 issues, all history\.<\/strong>/);
+  assert.match(lead, /<tr><td>Issue opened → fix merged<\/td><td class="num">15\.4<\/td><td class="num">114\.8<\/td><td class="num">7<\/td><\/tr>/);
+  assert.match(lead, /<tr><td>Fix PR opened → merged<\/td><td class="num">6\.6<\/td><td class="num">87<\/td><td class="num">7<\/td><\/tr>/);
+  assert.match(lead, /<strong>Not windowed — all 14 issues, all history\.<\/strong>/);
 });
 
 test('HTML monthly intake renders every windowed month the right way round', () => {

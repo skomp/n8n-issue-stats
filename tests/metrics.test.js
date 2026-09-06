@@ -87,6 +87,31 @@ test('lead times use the merged PR when an unmerged PR is also linked', () => {
   assert.equal(round1(lt.prDays), 6.6);
 });
 
+// SYNTHETIC FIXTURE 900004. Deleting the `.sort()` in leadTimes() left all 187
+// tests green: no fixture linked TWO merged PRs, so merged[0] was the only
+// merged PR either way. On the real store 8 issues have two or more merged PRs
+// and for #28046 the order genuinely differs (PR 28053 merged 2026-04-24, PR
+// 28517 merged 2026-04-15), so dropping the sort would attribute the lead time
+// to the LATER merge.
+//
+// #900004 lists its two merged PRs newest-merge-FIRST, so array order and merge
+// order disagree. Decoded by hand from the fixture dates:
+//   issue opened   2025-06-10T00:00:00Z
+//   PR 900402 opened 2025-06-15T00:00:00Z, merged 2025-07-10T09:36:00Z  <- earlier
+//   PR 900401 opened 2025-06-20T00:00:00Z, merged 2025-08-01T00:00:00Z  <- later
+// Earlier merge: fixDays = 30.4, prDays = 25.4.
+// Later merge:   fixDays = 52,   prDays = 42.
+test('lead times come from the EARLIEST merged PR, not the first one listed', () => {
+  const lt = leadTimes(byNumber.get(900004));
+  assert.equal(round1(lt.fixDays), 30.4);
+  assert.equal(round1(lt.prDays), 25.4);
+  // Without the sort these would be the later merge's figures.
+  assert.notEqual(round1(lt.fixDays), 52);
+  assert.notEqual(round1(lt.prDays), 42);
+  // The issue is still open, so it has no close lead time at all.
+  assert.equal(lt.closeDays, null);
+});
+
 test('lead times are never negative', () => {
   for (const issue of byNumber.values()) {
     for (const v of Object.values(leadTimes(issue))) {
