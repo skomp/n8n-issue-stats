@@ -54,7 +54,7 @@ constraints → deploy and run the recurring workflows in n8n Cloud.
 ## Quick start
 
 ```bash
-npm test                                        # 187 tests, zero dependencies
+npm test                                        # 190 tests, zero dependencies
 GITHUB_TOKEN=$(gh auth token) npm run backfill  # one-off, ~3.5 min, writes data/issues.ndjson
 ```
 
@@ -287,10 +287,15 @@ population}` so every table can print the denominator it actually used.
 
 ## What the tests are for
 
-187 tests, and the number is not the point. Partway through, a mutation review
+190 tests, and the number is not the point. Partway through, a mutation review
 seeded 17 deliberate bugs into a suite of 42 passing tests. **14 of them
 survived with the suite fully green** — including deleting the `mergedAt`
 filter, the single most load-bearing rule in the codebase.
+
+The final pre-merge review found three more of the same shape in a suite of
+187: the dead archive link, a table sort that could be inverted without turning
+a single test red, and a merged-PR sort that could be deleted outright. All
+three now have a test that has been watched failing.
 
 The tests were written to pass, not to fail. They have since been rebuilt so
 that every rule has a test that has been *watched failing* against a broken
