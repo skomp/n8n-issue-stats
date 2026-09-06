@@ -154,7 +154,7 @@ All three exist and are public.
 2. **Ingest workflow** — n8n Cloud, scheduled daily. Reads the watermark,
    fetches only issues updated since, upserts by issue number, writes the
    watermark back.
-3. **Report workflow** — n8n Cloud, scheduled weekly. Reads the store,
+3. **Report workflow** — n8n Cloud, scheduled weekly (confirmed). Reads the store,
    computes rollups, renders markdown, commits to `n8n-reports`.
 4. **Deploy script** — runs locally. Pushes workflow JSON from `n8n-test`
    to n8n Cloud through the public API.
@@ -305,9 +305,32 @@ suggest the issue should never have been filed as a bug
 
 ## 9. Deployment
 
-A script run locally pushes workflow JSON to
-`https://skomp.app.n8n.cloud/api/v1/workflows`, authenticating with the
-`X-N8N-API-KEY` header.
+**BLOCKED ON THE CURRENT PLAN. Read this before implementing.**
+
+`skomp` is on the n8n Cloud **free trial**. n8n's documentation states
+plainly: *"The n8n API isn't available during the free trial. Please upgrade
+to access this feature."* API keys are created at Settings > n8n API, and that
+surface is gated.
+
+The intended mechanism — a local script pushing workflow JSON to
+`https://skomp.app.n8n.cloud/api/v1/workflows` with the `X-N8N-API-KEY`
+header — therefore **cannot run today**. It remains the target design once the
+account is on a paid plan.
+
+**This blocks only deployment, not the pipeline.** The ingest and report
+workflows execute inside n8n and call the GitHub API; they never call n8n's own
+API. Everything in sections 4 through 8 is unaffected.
+
+### Options while on the trial
+
+| Option | Status |
+|---|---|
+| Instance-level MCP server at `/mcp-server/http` | **Untested — test this first.** It exposes workflow create/edit tools, n8n's docs specify no plan tier for it (unlike Source Control, which explicitly names Business/Enterprise), and it authenticates by OAuth as well as API key, so it may not depend on the gated API-key surface. Verifying this costs nothing. |
+| Upgrade to Starter | Unblocks the public API and the deploy script exactly as specified. |
+| Manual import through the UI | Always available. Author in the UI, export JSON into git for versioning, deploy by hand until the plan changes. |
+
+Testing the MCP option requires restarting Claude Code so the registered
+server's tools load, then attempting to list workflows on the instance.
 
 ### Why not the alternatives
 
@@ -316,7 +339,7 @@ A script run locally pushes workflow JSON to
 | Terraform `kodflow/n8n` | Single-maintainer community provider (19 stars). Viable, but a third-party dependency on the deploy path for three workflows. |
 | Terraform `devops247-online/n8n` | **Source repository returns 404.** The binary is downloadable but unauditable. Do not use. |
 | Official `n8n-cli` / `.n8np` packages | Explicitly Preview — "the package format and API may change". |
-| n8n native Git source control | Business/Enterprise plans only. `skomp`'s plan is unconfirmed. |
+| n8n native Git source control | Business/Enterprise plans only. `skomp` is on the free trial, so this was never available. |
 | GitHub Actions | The owner chose local execution. Note for the record that Actions is free with unlimited minutes on public repositories, so this constraint is optional. |
 
 ### Fields to strip before committing workflow JSON
@@ -371,6 +394,13 @@ Checks that assert values, not shapes:
 
 ## 13. Open questions
 
-- Which n8n Cloud plan is `skomp` on? Affects only whether native Git source
-  control was ever an option. Does not block implementation.
-- Report cadence: weekly is assumed. Confirm before implementation.
+- **Does the instance MCP server work on the free trial?** This is now the
+  only question that blocks deployment. Test by restarting Claude Code and
+  listing workflows on the instance. If it works, it is the deploy path for
+  the trial period; if not, the choice is upgrade or manual import.
+
+Resolved during design:
+
+- n8n Cloud plan: **free trial**. Native Git source control was never an
+  option (Business/Enterprise only), and the public API is unavailable.
+- Report cadence: **weekly**, confirmed by the owner.
