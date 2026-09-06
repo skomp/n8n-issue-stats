@@ -759,6 +759,10 @@ documented race where records shift between pages mid-crawl."
 {
   total: number,
   segments: { accepted: number, rejected: number },
+  // Spec section 8 mandates this as the report's HEADLINE. Counted from issues
+  // carrying any of closed:incomplete-template, closed:support-issue,
+  // closed:non-english; an issue with two of them counts once.
+  headline: { shouldNotHaveBeenFiled: number, shareOfPopulation: number },
   rejectionReasons: Record<string, number>,   // 'closed:duplicate' -> count
   components: Record<string, number>,         // accepted only; includes 'unclassified'
   componentCoverage: number,                  // 0..1, share of accepted that is not 'unclassified'
@@ -1400,6 +1404,31 @@ unavailable. The build and the field stripper are testable offline."
 ```
 
 ---
+
+## Correction — 2026-09-06, after the Task 1-7 review
+
+Two defects in THIS PLAN, found after the code was delivered. Both were transcribed
+faithfully by the implementers, because a plan reads as requirements.
+
+1. **The plan dropped two of its own spec's requirements.** Spec section 8 mandates a
+   Headline metric (the `shouldNotHaveBeenFiled` count — 2,336 issues, 43%) and says
+   "Always print the denominator. Every grouping states what share of the population
+   it covers." The Task 6 Rollup shape omitted the headline field entirely, and the
+   Task 7 template put a denominator on one of five groupings. The spec was right;
+   the plan failed to carry it.
+
+2. **The tests specified here were written to pass, not to fail.** A mutation review of
+   the delivered code ran 17 mutations and **14 survived with the full suite green** —
+   including deletion of BOTH `mergedAt` filters, the defect this plan itself flags as
+   load-bearing. The `leadTimes` test that claims to cover it passes for the wrong
+   reason: without the filter, `days(createdAt, null)` returns null via a guard, so the
+   assertion sees null either way. That test could never have failed.
+
+The Rollup shape above is corrected. Full remediation requirements are in
+`.superpowers/sdd/2026-09-06-n8n-triage-analytics/fix-round-1-findings.md`.
+
+**The lesson for anyone reading this plan: a test that passes against the current
+implementation has proven nothing until you have watched it fail against a broken one.**
 
 ## Self-review
 
