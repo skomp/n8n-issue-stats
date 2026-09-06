@@ -37,9 +37,11 @@ never letting the item count grow:
 
 - **The historical backfill does not run in n8n.** It is a local CLI, run once.
   n8n only ever handles the daily delta, roughly 20 records.
-- **Every Code node takes one item and returns one item**, holding the store as
-  a text string. Never one item per issue. This is the single most important
-  invariant in the project and the generated code says so in a comment.
+- **No Code node ever emits one item per issue.** The report node takes one item
+  holding the store as text and returns one item holding the rollup; the ingest
+  node takes one item per GraphQL page (at most 100 of them) and returns one.
+  This is the most important invariant in the project and the generated code
+  says so in a comment.
 - **Transport is GraphQL with explicit field selection.** Measured against the
   live API: REST returns ~7,100 bytes per issue, a minimal GraphQL selection
   returns ~498. The whole store is 2.9 MB rather than ~40 MB.
