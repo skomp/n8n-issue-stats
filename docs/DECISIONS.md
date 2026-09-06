@@ -145,16 +145,30 @@ of accepted work, so component grouping applies to the accepted segment only.
 
 ## Open questions
 
-- [ ] Which n8n Cloud plan is `skomp` on? Does not block implementation.
-- [ ] Report cadence — weekly assumed, needs confirming.
+None. Both earlier questions were resolved:
+
+- **n8n Cloud plan**: free trial. This closed the public REST API (API-key creation
+  is gated), which is why deployment goes through the instance MCP server instead —
+  that authorises over OAuth and is not tier-gated.
+- **Report cadence**: weekly, confirmed by the owner.
+
+Everything still outstanding is tracked as a GitHub issue in `skomp/n8n-test`.
 
 ## Later decisions
 
-**Ingest runs two branches concurrently (2026-09-06).** The GraphQL fetch and
-the 2.9 MB store download share no data — the query needs only the watermark
-from `state.json` — so a strictly linear chain made each wait on the other for
-no reason. They now run in parallel behind a Merge node in `chooseBranch` /
-`waitForAll` mode with `output: "empty"`.
+**Ingest fans out into two branches (2026-09-06).** The GraphQL fetch and the
+2.86 MB store download share no data — the query needs only the watermark from
+`state.json` — so they are separate branches joined by a Merge node in
+`chooseBranch` / `waitForAll` mode with `output: "empty"`.
+
+> **Correction.** This decision was originally recorded as "runs two branches
+> concurrently", with wall-clock overlap as the rationale. That is **not
+> established**: n8n executes nodes sequentially within one execution, and the
+> two runs available compared different data volumes (2 issues vs 439), so
+> neither can serve as evidence. The Merge barrier is still *required* for
+> correctness given the fan-out, and nothing is harmed — but the concurrency
+> claim is unmeasured and is tracked as
+> [#7](https://github.com/skomp/n8n-test/issues/7).
 
 The Merge is a **barrier, not a join**. `Fetch issues` emits one item per
 GraphQL page while the store branch emits one, so `combineAll` would produce an
@@ -229,3 +243,51 @@ read back from there as the `cachedResultName`.
 `scheduleTrigger`, and the orchestrator uses the report's slot (Monday 08:00).
 Publish the orchestrator, **or** the ingest and the report — never both, or the
 report runs twice a week. Nothing is published today, so nothing is broken.
+
+**HTML report and GitHub Pages (2026-09-06).** The report publishes three files
+per run instead of one: `reports/YYYY-MM-DD-triage.md`, the same content as a
+self-contained styled HTML page, and `index.html` as a copy of the latest.
+Pages serves the root from `main`, so https://skomp.github.io/n8n-reports/
+always shows the newest report. All three writes are idempotent upserts — each
+reads its blob sha first and omits it when the read 404s — so a same-day re-run
+leaves the published page and the archive in agreement
+([#2](https://github.com/skomp/n8n-test/issues/2)).
+
+The footer links to the archive at
+`https://github.com/skomp/n8n-reports/tree/main/reports`, **not** at a Pages
+path. GitHub Pages does not generate directory indexes, so
+`https://skomp.github.io/n8n-reports/reports/` returns 404 — publishing a real
+archive page is tracked as [#3](https://github.com/skomp/n8n-test/issues/3).
+
+**Orchestrator (2026-09-06).** A third workflow runs ingest then report through
+`executeWorkflow` nodes with `waitForSubWorkflow: true`, so the report always
+renders from a store synced in the same run. Both sub-workflows carry a second
+trigger (`executeWorkflowTrigger`) so they can be called this way while keeping
+their own schedules.
+
+Merging the two into one workflow was considered and rejected. n8n runs a
+sub-workflow in its own execution context; a single merged workflow would hold
+the fetched pages, the 2.86 MB store and the rendered report in one execution's
+memory — recreating the pressure this project exists to avoid.
+
+**Sticky-note documentation (2026-09-06).** Ten sticky notes across the three
+canvases, grouped by phase rather than per node. Each carries the *reason* a
+step is shaped as it is — why `Accept: application/vnd.github.raw` is
+mandatory, why the Merge passes no data, why pagination is ascending, why a 404
+on a sha read is not an error. Those facts cost real work to discover and are
+invisible from the node graph; someone who "simplifies" them breaks the
+pipeline in ways that stay green.
+
+**`scripts/deploy.sh` (2026-09-06).** Two schema defects fixed: it sent
+`active`, which n8n's OpenAPI spec marks `readOnly` under
+`additionalProperties: false` (so it would have 400'd on its first call), and
+it matched workflows by name, which would have allocated new ids on a fresh
+instance while the orchestrator held the old ones as literals. Payload shaping
+and id substitution moved into `scripts/deploy-payload.js` so the tested code
+is the deployed code.
+
+**The script has still never run** — creating an API key is gated on the free
+trial. It conforms to the published schema and its logic is unit tested; that
+is a different claim from "known to work", and
+[#8](https://github.com/skomp/n8n-test/issues/8) stays open until it runs
+against a paid-plan instance.
