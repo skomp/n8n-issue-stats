@@ -9,6 +9,11 @@ Ingest the triaged issues of `n8n-io/n8n`, group them by component and by triage
 outcome, calculate lead times, and publish a dated markdown report. Author the
 workflows offline in git and deploy them to n8n Cloud with a script.
 
+**Amended 2026-09-06.** Each run publishes the report as markdown **and** as a
+styled HTML page, served from GitHub Pages. See section 5, "Published output".
+Deployment used the instance MCP server rather than the script, because the
+public API is gated on the free trial; see section 9.
+
 The pipeline must stay memory-bounded. An earlier attempt by the owner failed
 with an out-of-memory error in the aggregation step.
 
@@ -150,9 +155,30 @@ triage**, not delivery. Do not present it as a measure of engineering output.
 |---|---|
 | `skomp/n8n-test` | Workflow JSON, deploy script, this spec |
 | `skomp/n8n-data` | `issues.ndjson`, `state.json` (watermark) |
-| `skomp/n8n-reports` | `reports/YYYY-MM-DD-triage.md` |
+| `skomp/n8n-reports` | `reports/YYYY-MM-DD-triage.md`, `reports/YYYY-MM-DD-triage.html`, `index.html` |
 
 All three exist and are public.
+
+#### Published output — amended 2026-09-06
+
+The original table listed markdown only. What shipped writes **three files per
+run**:
+
+| Path | Content |
+|---|---|
+| `reports/YYYY-MM-DD-triage.md` | the markdown report |
+| `reports/YYYY-MM-DD-triage.html` | the same numbers as a styled, self-contained page — one inline `<style>` block, no external stylesheet, script or web font, so identical bytes render from GitHub Pages, from `file://` and from a mail client |
+| `index.html` | a byte-for-byte copy of the latest HTML report |
+
+`skomp/n8n-reports` serves **GitHub Pages** from the repository root, so the
+latest report is published at <https://skomp.github.io/n8n-reports/>. Pages
+generates no directory index, so the archive link in each page's footer points
+at the GitHub tree <https://github.com/skomp/n8n-reports/tree/main/reports>
+rather than at a Pages directory URL.
+
+All three writes are **idempotent upserts**: each read its existing sha before
+writing, so a same-day re-run replaces the file instead of failing. See
+`skomp/n8n-test#2`.
 
 ### Moving parts
 
@@ -163,9 +189,25 @@ All three exist and are public.
    fetches only issues updated since, upserts by issue number, writes the
    watermark back.
 3. **Report workflow** — n8n Cloud, scheduled weekly (confirmed). Reads the store,
-   computes rollups, renders markdown, commits to `n8n-reports`.
+   computes rollups, renders markdown **and HTML** (amended 2026-09-06), commits
+   all three files to `n8n-reports`.
 4. **Deploy script** — runs locally. Pushes workflow JSON from `n8n-test`
    to n8n Cloud through the public API.
+
+#### Three workflows, not two — amended 2026-09-06
+
+A third workflow shipped: an **orchestrator** (`n3cSgsUgaLDg23Wg`, *Triage
+analytics — sync and report*). It runs the ingest and then the report,
+sequentially, through two Execute Workflow nodes that both set
+`options.waitForSubWorkflow: true`, so the report never reads a store the ingest
+has not finished writing.
+
+To make that possible, the ingest (`AE9bsoYqgcFuz1T3`) and the report
+(`yuzPI1WHGOcpzljg`) each carry a **second entry point**: an
+`executeWorkflowTrigger` node beside their own schedule trigger. Each trigger
+starts the same first working node, so an orchestrated run and a scheduled run
+execute an identical graph. n8n fires each trigger as its own isolated
+execution, so adding the second entry point left the schedules untouched.
 
 ### How the out-of-memory failure is prevented
 
@@ -267,6 +309,14 @@ testing, workflow}` plus ~40 scoped packages under `packages/@n8n/`.
 
 Written to `skomp/n8n-reports/reports/YYYY-MM-DD-triage.md`.
 
+**Amended 2026-09-06.** Every run also writes
+`reports/YYYY-MM-DD-triage.html` and a root `index.html` copy of the latest
+report, published through GitHub Pages at
+<https://skomp.github.io/n8n-reports/>. The two renderings carry the same
+numbers, the same denominators and the same caveats: both iterate one shared
+caveat list, and the tests assert the two renderings stay the same length. See
+"Published output — amended 2026-09-06" in section 5.
+
 ### Headline
 
 The accepted/rejected ratio, and the count of issues rejected for reasons that
@@ -356,6 +406,29 @@ finding: the intake-quality problem is stable over time, not improving.
 
 ## 9. Deployment
 
+### RESOLVED — amended 2026-09-06
+
+**This section is superseded. Deployment is not blocked.** The instance-level
+MCP server at `/mcp-server/http` was tested on the free trial and it **works**.
+All three workflows were created, updated and executed through it. The
+"Untested — test this first" row and the "BLOCKED ON THE CURRENT PLAN" warning
+below describe the state at design time and are kept for the record only.
+
+What was actually deployed, all through the MCP server:
+
+| Workflow | id |
+|---|---|
+| Ingest | `AE9bsoYqgcFuz1T3` |
+| Report | `yuzPI1WHGOcpzljg` |
+| Orchestrator | `n3cSgsUgaLDg23Wg` |
+
+The finding the original row predicted holds: the MCP server does not depend on
+the gated API-key surface, so it is available on the trial while
+`https://skomp.app.n8n.cloud/api/v1/workflows` is not. The public API and the
+deploy script remain the target once the account is on a paid plan.
+
+---
+
 **BLOCKED ON THE CURRENT PLAN. Read this before implementing.**
 
 `skomp` is on the n8n Cloud **free trial**. n8n's documentation states
@@ -376,7 +449,7 @@ API. Everything in sections 4 through 8 is unaffected.
 
 | Option | Status |
 |---|---|
-| Instance-level MCP server at `/mcp-server/http` | **Untested — test this first.** It exposes workflow create/edit tools, n8n's docs specify no plan tier for it (unlike Source Control, which explicitly names Business/Enterprise), and it authenticates by OAuth as well as API key, so it may not depend on the gated API-key surface. Verifying this costs nothing. |
+| Instance-level MCP server at `/mcp-server/http` | **Tested 2026-09-06 — it works on the free trial.** Amended: this row previously read "Untested — test this first". It exposes workflow create/edit tools, n8n's docs specify no plan tier for it (unlike Source Control, which explicitly names Business/Enterprise), and it authenticates by OAuth as well as API key, so it does not depend on the gated API-key surface. All three workflows were deployed and executed through it. |
 | Upgrade to Starter | Unblocks the public API and the deploy script exactly as specified. |
 | Manual import through the UI | Always available. Author in the UI, export JSON into git for versioning, deploy by hand until the plan changes. |
 
@@ -445,10 +518,14 @@ Checks that assert values, not shapes:
 
 ## 13. Open questions
 
-- **Does the instance MCP server work on the free trial?** This is now the
-  only question that blocks deployment. Test by restarting Claude Code and
-  listing workflows on the instance. If it works, it is the deploy path for
-  the trial period; if not, the choice is upgrade or manual import.
+No open question blocks deployment.
+
+Resolved after design — amended 2026-09-06:
+
+- **Does the instance MCP server work on the free trial?** **Yes.** This was
+  recorded here as "the only question that blocks deployment". It was tested and
+  it works: all three workflows were created, updated and executed through it.
+  It is the deploy path for the trial period. See section 9.
 
 Resolved during design:
 
