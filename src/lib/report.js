@@ -22,12 +22,23 @@ export function reportHtmlPath(date) {
 // idempotent upserts — see planWrite() in build/build-workflows.js.
 export const INDEX_PATH = 'index.html';
 
-// The archive link is ABSOLUTE on purpose. The identical bytes are published
-// to two different directory depths — reports/YYYY-MM-DD-triage.html and the
-// site root as index.html — so a relative "reports/" href would resolve to
-// reports/reports/ from the dated copy. A root-relative "/reports/" is wrong
-// too: this is a project Pages site, served under /n8n-reports/.
-export const ARCHIVE_URL = 'https://skomp.github.io/n8n-reports/reports/';
+// The archive link points at the GITHUB TREE, not at the Pages site.
+//
+// It used to be https://skomp.github.io/n8n-reports/reports/, and that URL
+// returns 404. GitHub Pages does not generate directory indexes, and the report
+// workflow writes reports/YYYY-MM-DD-triage.{md,html} plus a root index.html —
+// it never writes reports/index.html. So the only navigation on the published
+// page was dead. https://github.com/skomp/n8n-reports/tree/main/reports returns
+// 200 and renders a real dated file listing. (Generating a proper
+// reports/index.html is the nicer product and is filed separately.)
+//
+// The link is ABSOLUTE on purpose. The identical bytes are published to two
+// different directory depths — reports/YYYY-MM-DD-triage.html and the site root
+// as index.html — so a relative "reports/" href would resolve to reports/reports/
+// from the dated copy, and a root-relative "/reports/" is wrong too because this
+// is a project Pages site served under /n8n-reports/. An off-site absolute URL
+// is correct from both depths and from a file:// copy.
+export const ARCHIVE_URL = 'https://github.com/skomp/n8n-reports/tree/main/reports';
 
 // The accepted:rejected ratio, expressed as accepted issues per rejected issue.
 // Undefined when nothing was rejected, which prints as an em dash.
@@ -360,7 +371,7 @@ export function renderHtml(r, { generatedAt }) {
     ...CAVEATS.map(c => `<li>${c.html}</li>`),
     '</ul>',
 
-    `<footer><a href="${ARCHIVE_URL}">Every report, by date</a> — this page is a copy of the most recent one.</footer>`,
+    `<footer><a href="${ARCHIVE_URL}">Every report, by date, on GitHub</a> — this page is a copy of the most recent one.</footer>`,
   ].join('\n');
 
   return `<!doctype html>

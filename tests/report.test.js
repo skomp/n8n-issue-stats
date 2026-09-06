@@ -369,11 +369,21 @@ test('the page is self-contained: no external stylesheet, script or font', () =>
   assert.deepEqual(urls, [ARCHIVE_URL]);
 });
 
+// This test CANNOT verify that the URL resolves — it makes no network call, and
+// that is exactly what made its predecessor useless. The old assertion pinned
+// https://skomp.github.io/n8n-reports/reports/ as a literal and agreed with the
+// code about a fact neither could check: that URL returns 404, because GitHub
+// Pages generates no directory index and the workflow never writes
+// reports/index.html. The URL below was checked by hand and returns 200 with a
+// real dated file listing. Anyone changing it must re-check it the same way;
+// a green suite here is not evidence that the link works.
 test('the archive link is absolute, because the same bytes are served from two depths', () => {
   // index.html sits at the site root and the dated copy sits in reports/. A
   // relative "reports/" href resolves to reports/reports/ from the dated copy.
-  assert.equal(ARCHIVE_URL, 'https://skomp.github.io/n8n-reports/reports/');
-  assert.match(html, /<footer><a href="https:\/\/skomp\.github\.io\/n8n-reports\/reports\/">/);
+  assert.equal(ARCHIVE_URL, 'https://github.com/skomp/n8n-reports/tree/main/reports');
+  assert.match(html, /<footer><a href="https:\/\/github\.com\/skomp\/n8n-reports\/tree\/main\/reports">Every report, by date, on GitHub<\/a>/);
+  // Not the Pages directory URL, which 404s.
+  assert.doesNotMatch(html, /skomp\.github\.io\/n8n-reports\/reports/);
 });
 
 test('every colour is a token defined on bare :root', () => {

@@ -384,7 +384,12 @@ Publishing a workflow is what activates its trigger.
 - **Fix lead time covers 543 issues**, not 5,464 — only those with a linked PR
   that actually merged.
 - **`index.html` always shows the most recent run.** Older reports are reachable
-  from the link in its footer, or by their dated path under `reports/`.
+  from the link in its footer, which points at the GitHub tree
+  <https://github.com/skomp/n8n-reports/tree/main/reports>, or by their dated
+  path under `reports/`. **Correction, 2026-09-06:** that link previously pointed
+  at <https://skomp.github.io/n8n-reports/reports/>, which returns 404. GitHub
+  Pages generates no directory index and the workflow never writes
+  `reports/index.html`, so the published page had no working navigation at all.
 - **The backfill sometimes trips GitHub's secondary rate limit** around page 20
   of 55. A five-minute cooldown clears it, and the CLI only writes on full
   completion so retrying is safe.
