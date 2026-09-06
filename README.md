@@ -81,8 +81,14 @@ npm test
 
 This runs the full suite with Node's built-in test runner
 (`node --test tests/*.test.js`). The project has zero runtime or dev
-dependencies. Use the glob form: `node --test tests/` (with a trailing slash)
-is broken in Node 24 and silently runs nothing.
+dependencies.
+
+Use the glob form. `node --test tests/` (with a trailing slash) does not work
+in Node 24: it treats the directory as a module path and fails before the test
+runner starts. Verified on Node v24.19.0 — it exits **non-zero** with
+`Error: Cannot find module '<repo>/tests'` and `code: 'MODULE_NOT_FOUND'`.
+The failure is loud, so it cannot produce a false green; the glob is required
+because the directory form does not run, not because it runs silently.
 
 ### The test fixture
 
