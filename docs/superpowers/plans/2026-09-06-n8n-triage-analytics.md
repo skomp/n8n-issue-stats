@@ -36,6 +36,29 @@
 > | Component coverage on fixtures | 6/8 | 7/10 |
 > | Task 3 step 5 assertion | `acc !== 8` | `acc !== 10` |
 >
+> **Fix round 3 superseded the "Now" column above.** It appended a third
+> synthetic record, **900003**, carrying TWO `triage:*` labels: no fixture
+> record carried more than one, so a funnel denominator built by summing
+> `triageStates` (a count of LABELS) happened to equal the count of ISSUES and
+> passed for the wrong reason. On the real store the two differ -- 1,546 labels
+> across 1,309 issues. The 10 real records remain byte-identical and unreordered.
+>
+> | Claim | Fix round 1 | Fix round 3 (current) |
+> |---|---|---|
+> | Fixture size | 10 real + 2 synthetic = 12 | 10 real + 3 synthetic = **13** |
+> | Segment split (all-time) | 10 accepted / 2 rejected | **11 accepted / 2 rejected** |
+> | Issues with a merged closing PR | 6 of 12 | 6 of **13** (900003 links no PR) |
+> | Triage labels vs triaged issues | equal by accident | **10 labels / 9 issues** in the test window |
+> | Task 3 step 5 assertion | `acc !== 10` | `acc !== 11` |
+>
+> Fix round 3 also windowed the intake sections. `rollup()` now takes
+> `{ windowDays = 180, now = new Date() }`; the rollup tests pass an explicit
+> 440-day window ending 2026-09-06, which is the one that SPLITS this fixture
+> (11 of 13 records inside it), so a windowed figure can never equal an
+> all-time figure by accident. Within that window: `components.unclassified` is
+> 4, `components['packages/nodes-base']` is 3, and component coverage is 5/9.
+> Lead times are NOT windowed and stay at n=12 / n=6 / n=6.
+>
 > Two spec violations were also fixed, because the spec is binding above this
 > plan. The plan omitted both:
 >
@@ -343,7 +366,15 @@ Expected: PASS, 8 tests
 
 - [ ] **Step 5: Verify against the whole population**
 
-This guards the aggregate, not just the fixtures. Run the backfill store through the classifier once it exists (Task 7); for now assert the fixture split is 10 accepted / 2 rejected (CORRECTED in fix round 1; it was 8 accepted before the two synthetic records were appended):
+This guards the aggregate, not just the fixtures. Run the backfill store through the classifier once it exists (Task 7); for now assert the fixture split is **11 accepted / 2 rejected**.
+
+> **CORRECTED in fix round 3.** This step previously carried two different
+> figures two lines apart: the guard read `if (acc !== 10)` while the expected
+> output below it read `accepted 8 rejected 2`. Fix round 1 corrected the guard
+> from 8 to 10 when synthetic records 900001 and 900002 were appended, and
+> missed the `Expected:` line. Fix round 3 appended synthetic record 900003, so
+> the fixture is now 13 records: 11 accepted, 2 rejected. Both the guard and
+> the expected output below are now that figure.
 
 ```bash
 node -e "
@@ -351,11 +382,11 @@ import('./src/lib/classify.js').then(async ({segmentOf}) => {
   const {readFileSync} = await import('node:fs');
   const rs = readFileSync('tests/fixtures/issues.sample.ndjson','utf8').trim().split('\n').map(JSON.parse);
   const acc = rs.filter(r => segmentOf(r)==='accepted').length;
-  console.log('accepted', acc, 'rejected', rs.length-acc);
-  if (acc !== 10) { console.error('EXPECTED 10 accepted'); process.exit(1); }
+  console.log('accepted', acc, 'rejected', rs.length-acc, 'total', rs.length);
+  if (acc !== 11) { console.error('EXPECTED 11 accepted'); process.exit(1); }
 });"
 ```
-Expected: `accepted 8 rejected 2`
+Expected: `accepted 11 rejected 2 total 13`
 
 - [ ] **Step 6: Commit**
 
@@ -789,6 +820,15 @@ documented race where records shift between pages mid-crawl."
 
 ### Task 6: Rollup aggregation
 
+> **SUPERSEDED IN PART — read `src/lib/rollup.js` before reusing this task's
+> code.** Fix round 3 gave `rollup()` an options argument
+> (`{ windowDays = 180, now = new Date() }`), added `window: { since, days,
+> population }` and `triagedIssues` to the returned shape, windowed the intake
+> sections while deliberately leaving all three lead-time measures over full
+> history, and split the headline into windowed and `allTime` figures. The
+> code blocks below are the ORIGINAL build and no longer match what ships.
+> The same applies to Task 7's report renderer.
+
 **Files:**
 - Create: `src/lib/rollup.js`, `tests/rollup.test.js`
 
@@ -855,13 +895,22 @@ test('rejection reasons are counted from closed:* labels', () => {
   assert.equal(r.rejectionReasons['closed:enhancement/feature'], 1);
 });
 
-// CORRECTED in fix round 1: 6 of the 12 fixtures have a merged closing PR
-// (it was 5 of 10 before the synthetic records 900001/900002 were appended).
-// This assertion was also strengthened to check the median and p90 by value.
+// CORRECTED in fix round 1, and again in fix round 3: 6 of the 13 fixtures
+// have a merged closing PR (it was 5 of 10 before the synthetic records
+// 900001/900002 were appended; record 900003, appended in fix round 3, is
+// open and links no PR, so the count of 6 is unchanged).
+//
+// CORRECTION NOTE (fix round 3): the snippet below previously read
+// `assert.equal(r.leadTimes.fix.n, 5)` and `assert.ok(median > 0)` under a
+// comment claiming 6 of the 12 and claiming the assertion had been
+// strengthened to check the median and p90 BY VALUE. The comment was right
+// and the code was stale -- `median > 0` holds for almost any wrong number,
+// which is the exact defect fix round 1 existed to remove. The real
+// tests/rollup.test.js has always been correct; only this snippet was wrong.
 test('fix lead time is computed over merged PRs only', () => {
-  assert.equal(r.leadTimes.fix.n, 5);
-  assert.ok(r.leadTimes.fix.median > 0);
-  assert.ok(r.leadTimes.fix.p90 >= r.leadTimes.fix.median);
+  assert.equal(r.leadTimes.fix.n, 6);
+  assert.equal(Math.round(r.leadTimes.fix.median * 10) / 10, 12);
+  assert.equal(Math.round(r.leadTimes.fix.p90 * 10) / 10, 114.8);
 });
 
 test('months are keyed YYYY-MM and sum to the total', () => {
