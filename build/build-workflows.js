@@ -458,6 +458,21 @@ export const NODE_TYPE_VERSIONS = {
   'n8n-nodes-base.httpRequest': 4.5,
   'n8n-nodes-base.code': 2,
   'n8n-nodes-base.merge': 3.2,
+  'n8n-nodes-base.executeWorkflow': 1.3,
+  'n8n-nodes-base.executeWorkflowTrigger': 1.2,
+};
+
+// The two sub-workflows, by the id they already carry on the instance. The
+// orchestrator's Execute Workflow nodes address them by id, so these ids are
+// deployment facts, not names this build is free to choose: a wrong id points
+// the orchestrator at a different workflow and the run still succeeds.
+//
+// The `name` is the workflow's own name AND the cachedResultName the editor
+// shows in the resource locator, so it is defined here once and read back by
+// buildIngestWorkflow / buildReportWorkflow. The two cannot drift apart.
+export const SUB_WORKFLOWS = {
+  ingest: { id: 'AE9bsoYqgcFuz1T3', name: 'Triage analytics \u2014 ingest' },
+  report: { id: 'yuzPI1WHGOcpzljg', name: 'Triage analytics \u2014 report' },
 };
 
 // ---------------------------------------------------------------------------
@@ -604,6 +619,89 @@ function mergeBarrierNode({ name, position, notes }) {
       numberInputs: 2,
       chooseBranchMode: 'waitForAll',
       output: 'empty',
+    },
+    notes,
+    notesInFlow: false,
+  };
+}
+
+// A SECOND TRIGGER, added so a workflow can be invoked as a sub-workflow.
+//
+// A workflow is only callable by an Execute Workflow node if it carries an
+// Execute Workflow Trigger. n8n supports several triggers on one workflow and
+// each fires its OWN isolated execution, so adding this leaves the existing
+// Schedule Trigger and its cadence completely unchanged.
+//
+// inputSource "passthrough" declares that the sub-workflow takes NO input of
+// its own and simply receives whatever the caller sends. Neither sub-workflow
+// reads caller input — both start from state.json / issues.ndjson — so there
+// is no input schema to define, and defining one would force the caller to
+// send `workflowInputs`.
+//
+// The trigger must fan out to EVERY node the Schedule Trigger starts. The
+// ingest's schedule starts two concurrent branches; a sub-workflow trigger
+// wired to only one of them would run half the workflow, and the run would
+// still report success.
+function executeWorkflowTriggerNode({ name, position, notes }) {
+  return {
+    name,
+    type: 'n8n-nodes-base.executeWorkflowTrigger',
+    typeVersion: NODE_TYPE_VERSIONS['n8n-nodes-base.executeWorkflowTrigger'],
+    position,
+    parameters: { inputSource: 'passthrough' },
+    notes,
+    notesInFlow: false,
+  };
+}
+
+// Calls one of the two sub-workflows and WAITS for it.
+//
+// Three parameters carry the whole contract, and two of them are defaults that
+// are set anyway:
+//
+//   mode "once"                  — one sub-execution for the whole input, not
+//                                  one per item. The caller sends a single
+//                                  empty item today, but "each" would make the
+//                                  node's behaviour depend on upstream item
+//                                  count, which is not what this expresses.
+//   source "database"            — the sub-workflow is the one stored on this
+//                                  instance under `workflowId`, not a URL, a
+//                                  parameter or inline JSON.
+//   options.waitForSubWorkflow   — set EXPLICITLY although true is the current
+//                                  default. Sequential execution is the entire
+//                                  reason this workflow exists: without the
+//                                  wait, "Run report" starts while the ingest
+//                                  is still fetching and publishes a report
+//                                  over the PREVIOUS week's store, silently and
+//                                  with a green run. Leaving it implicit bets
+//                                  the report's correctness on an n8n default
+//                                  never changing.
+//
+// workflowId is a RESOURCE LOCATOR, not a string. mode "id" with the raw id in
+// `value`; `cachedResultName` is what the editor renders, and is set so the
+// node reads as "Triage analytics — ingest" rather than a bare id.
+//
+// workflowInputs is DELIBERATELY ABSENT. Both triggers are "passthrough", so
+// there is no input schema to fill. The UI initialises the field to
+// { mappingMode: 'defineBelow', value: null } before a schema is loaded, and
+// emitting that initialisation state into committed JSON is a documented
+// footgun — it is a half-built UI state, not a configuration.
+function executeWorkflowNode({ name, position, target, notes }) {
+  return {
+    name,
+    type: 'n8n-nodes-base.executeWorkflow',
+    typeVersion: NODE_TYPE_VERSIONS['n8n-nodes-base.executeWorkflow'],
+    position,
+    parameters: {
+      mode: 'once',
+      source: 'database',
+      workflowId: {
+        __rl: true,
+        mode: 'id',
+        value: target.id,
+        cachedResultName: target.name,
+      },
+      options: { waitForSubWorkflow: true },
     },
     notes,
     notesInFlow: false,
@@ -871,6 +969,15 @@ export function buildIngestWorkflow() {
       position: [0, 0],
       parameters: { rule: { interval: [{ field: 'days', daysInterval: 1 }] } },
     },
+    executeWorkflowTriggerNode({
+      name: 'When executed by another workflow',
+      position: [0, 340],
+      notes:
+        'The second entry point, used by "Triage analytics \u2014 sync and report". It fans out to BOTH ' +
+        'branch heads, exactly as "Daily" does — wired to only one of them, an orchestrated run would ' +
+        'fetch without downloading the store (or the reverse) and still report success. The daily ' +
+        'schedule is untouched: n8n fires each trigger as its own isolated execution.',
+    }),
     httpRequestNode({
       name: 'Read state.json',
       position: [220, -140],
@@ -953,8 +1060,14 @@ export function buildIngestWorkflow() {
   // Write state.json so a failed store write leaves the watermark un-advanced
   // and the next run re-fetches the same window; the reverse order would open
   // a permanent gap.
-  const fetchBranch = ['Daily', 'Read state.json', 'Plan fetch', 'Fetch issues'];
-  const storeBranch = ['Daily', 'Read issues.ndjson sha', 'Read issues.ndjson'];
+  //
+  // "When executed by another workflow" is a SECOND head on the same two
+  // branches. Every trigger of this workflow must reach both branch heads, so
+  // the fan-out is generated from one list rather than written twice.
+  const TRIGGERS = ['Daily', 'When executed by another workflow'];
+  const BRANCH_HEADS = ['Read state.json', 'Read issues.ndjson sha'];
+  const fetchBranch = ['Read state.json', 'Plan fetch', 'Fetch issues'];
+  const storeBranch = ['Read issues.ndjson sha', 'Read issues.ndjson'];
   const tail = ['Merge', 'Upsert store', 'Write issues.ndjson', 'Write state.json'];
 
   const connections = {};
@@ -966,8 +1079,11 @@ export function buildIngestWorkflow() {
     for (let i = 0; i < names.length - 1; i += 1) connect(names[i], names[i + 1]);
   };
 
-  // Order matters only for readability: "Daily" ends up with both branch heads
-  // in one output array, which is how n8n fans out.
+  // Order matters only for readability: each trigger ends up with both branch
+  // heads in one output array, which is how n8n fans out.
+  for (const trigger of TRIGGERS) {
+    for (const head of BRANCH_HEADS) connect(trigger, head);
+  }
   chainUp(fetchBranch);
   chainUp(storeBranch);
   // Merge input INDEXES are 0-based on the wire; the UI labels them Input 1 and
@@ -978,7 +1094,7 @@ export function buildIngestWorkflow() {
   chainUp(tail);
 
   return {
-    name: 'Triage analytics — ingest',
+    name: SUB_WORKFLOWS.ingest.name,
     nodes,
     connections,
     active: false,
@@ -999,6 +1115,15 @@ export function buildReportWorkflow() {
       position: [0, 0],
       parameters: { rule: { interval: [{ field: 'weeks', weeksInterval: 1, triggerAtDay: [1], triggerAtHour: 8 }] } },
     },
+    executeWorkflowTriggerNode({
+      name: 'When executed by another workflow',
+      position: [0, 200],
+      notes:
+        'The second entry point, used by "Triage analytics \u2014 sync and report". It starts the same ' +
+        'node the weekly schedule starts, so an orchestrated run and a scheduled run execute an ' +
+        'identical graph. The weekly schedule is untouched: n8n fires each trigger as its own ' +
+        'isolated execution.',
+    }),
     rawReadNode({ name: 'Read issues.ndjson', position: [220, 0], path: 'issues.ndjson' }),
     codeNode({ name: 'Rollup and render', position: [440, 0], jsCode: buildReportCode() }),
     shaReadNode({
@@ -1072,16 +1197,80 @@ export function buildReportWorkflow() {
   // The writes stay dated-first, index.html LAST: index.html is the pointer at
   // the archive, and it must not be advanced to a report the archive does not
   // have.
-  const chain = ['Weekly', 'Read issues.ndjson', 'Rollup and render',
+  //
+  // Both triggers start the SAME first node, so an orchestrated run and a
+  // scheduled run execute an identical graph.
+  const HEAD = 'Read issues.ndjson';
+  const TRIGGERS = ['Weekly', 'When executed by another workflow'];
+  const chain = [HEAD, 'Rollup and render',
     'Read report sha', 'Read report HTML sha', 'Read index.html sha',
     'Plan writes', 'Write report', 'Write report HTML', 'Write index.html'];
+  const connections = {};
+  for (const trigger of TRIGGERS) {
+    connections[trigger] = { main: [[{ node: HEAD, type: 'main', index: 0 }]] };
+  }
+  for (let i = 0; i < chain.length - 1; i += 1) {
+    connections[chain[i]] = { main: [[{ node: chain[i + 1], type: 'main', index: 0 }]] };
+  }
+
+  return {
+    name: SUB_WORKFLOWS.report.name,
+    nodes,
+    connections,
+    active: false,
+    settings: { executionOrder: 'v1' },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Orchestrator workflow
+//
+// Slug: n8n-triage-orchestrator. Generated to workflows/orchestrator.json.
+// ---------------------------------------------------------------------------
+
+export function buildOrchestratorWorkflow() {
+  const nodes = [
+    {
+      name: 'Weekly',
+      type: 'n8n-nodes-base.scheduleTrigger',
+      typeVersion: NODE_TYPE_VERSIONS['n8n-nodes-base.scheduleTrigger'],
+      position: [0, 0],
+      parameters: { rule: { interval: [{ field: 'weeks', weeksInterval: 1, triggerAtDay: [1], triggerAtHour: 8 }] } },
+    },
+    executeWorkflowNode({
+      name: 'Run ingest',
+      position: [220, 0],
+      target: SUB_WORKFLOWS.ingest,
+      notes:
+        'Runs the ingest sub-workflow to completion and only then returns. It reaches the ingest ' +
+        'through that workflow\'s Execute Workflow Trigger, which fans out to both of its branches, ' +
+        'so an orchestrated run does exactly what the daily schedule does.',
+    }),
+    executeWorkflowNode({
+      name: 'Run report',
+      position: [440, 0],
+      target: SUB_WORKFLOWS.report,
+      notes:
+        'MUST NOT START BEFORE "Run ingest" HAS FINISHED. The report is rendered from ' +
+        'issues.ndjson, which the ingest rewrites; started early it reads the store as it was ' +
+        'BEFORE this week\'s sync and publishes a report over stale data. Nothing fails and the run ' +
+        'is green — the only symptom is a report that is quietly a week behind. Two things enforce ' +
+        'the order: this node is downstream of "Run ingest" on the wire, and "Run ingest" sets ' +
+        'options.waitForSubWorkflow explicitly, so it blocks until the ingest sub-execution ends ' +
+        'instead of firing it and continuing.',
+    }),
+  ];
+
+  // A strict two-step chain. There is nothing to parallelise here: the second
+  // step consumes what the first one wrote.
+  const chain = ['Weekly', 'Run ingest', 'Run report'];
   const connections = {};
   for (let i = 0; i < chain.length - 1; i += 1) {
     connections[chain[i]] = { main: [[{ node: chain[i + 1], type: 'main', index: 0 }]] };
   }
 
   return {
-    name: 'Triage analytics — report',
+    name: 'Triage analytics \u2014 sync and report',
     nodes,
     connections,
     active: false,
@@ -1097,6 +1286,7 @@ export function buildReportWorkflow() {
 export const GENERATED_WORKFLOWS = [
   ['ingest.json', buildIngestWorkflow],
   ['report.json', buildReportWorkflow],
+  ['orchestrator.json', buildOrchestratorWorkflow],
 ];
 
 export function renderWorkflowFile(build) {

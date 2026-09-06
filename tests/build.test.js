@@ -14,10 +14,12 @@ import {
   planWrite,
   buildIngestWorkflow,
   buildReportWorkflow,
+  buildOrchestratorWorkflow,
   renderWorkflowFile,
   GENERATED_WORKFLOWS,
   GITHUB_CREDENTIAL,
   NODE_TYPE_VERSIONS,
+  SUB_WORKFLOWS,
 } from '../build/build-workflows.js';
 import { ISSUES_QUERY } from '../src/lib/github.js';
 import { ALL_FILTER_LABELS } from '../src/lib/labels.js';
@@ -344,7 +346,7 @@ test('buildReportPayload refuses a truncated store rather than publishing "Popul
 // --- Generated workflow structure --------------------------------------------
 
 test('generated workflows carry no instance-specific fields', () => {
-  for (const build of [buildIngestWorkflow, buildReportWorkflow]) {
+  for (const build of [buildIngestWorkflow, buildReportWorkflow, buildOrchestratorWorkflow]) {
     const cleaned = stripInstanceFields(build());
     assert.deepEqual(cleaned, stripInstanceFields(cleaned)); // idempotent on real output
     for (const node of cleaned.nodes) {
@@ -463,8 +465,10 @@ test('every generated node type version matches NODE_TYPE_VERSIONS', () => {
     'n8n-nodes-base.httpRequest': 4.5,
     'n8n-nodes-base.code': 2,
     'n8n-nodes-base.merge': 3.2,
+    'n8n-nodes-base.executeWorkflow': 1.3,
+    'n8n-nodes-base.executeWorkflowTrigger': 1.2,
   });
-  for (const build of [buildIngestWorkflow, buildReportWorkflow]) {
+  for (const build of [buildIngestWorkflow, buildReportWorkflow, buildOrchestratorWorkflow]) {
     for (const node of build().nodes) {
       assert.ok(node.type in NODE_TYPE_VERSIONS, `${node.type} is not documented in NODE_TYPE_VERSIONS`);
       assert.equal(node.typeVersion, NODE_TYPE_VERSIONS[node.type]);
@@ -957,6 +961,240 @@ test('the generated "Rollup and render" node emits all three files as ONE item',
   assert.match(html, /class="figure"><strong>13<\/strong>/);
   const md = Buffer.from(j.content, 'base64').toString('utf8');
   assert.match(md, /Population: \*\*13\*\*/);
+});
+
+// --- Sub-workflow triggers and the orchestrator ------------------------------
+//
+// The orchestrator exists for ONE reason: the report must be rendered from a
+// store the ingest has already refreshed. Everything below defends that
+// ordering, because the failure mode is silent — a report over last week's
+// store publishes cleanly and the run is green.
+//
+// Literals on purpose throughout. Comparing against the build's own constants
+// would make these tests agree with whatever the build says.
+
+const ORCHESTRATOR_STEPS = [
+  ['Run ingest', 'AE9bsoYqgcFuz1T3', 'Triage analytics — ingest'],
+  ['Run report', 'yuzPI1WHGOcpzljg', 'Triage analytics — report'],
+];
+
+// Walks the connection graph from the trigger and returns the node names in
+// execution order. Reading node ORDER out of workflow.nodes would pass on a
+// workflow whose wires say the opposite of its array.
+const executionOrder = (workflow, from) => {
+  const order = [from];
+  const { connections } = workflow;
+  while (connections[order.at(-1)]) order.push(connections[order.at(-1)].main[0][0].node);
+  return order;
+};
+
+test('SUB_WORKFLOWS carries the ids the two workflows already have on the instance', () => {
+  assert.deepEqual(SUB_WORKFLOWS, {
+    ingest: { id: 'AE9bsoYqgcFuz1T3', name: 'Triage analytics — ingest' },
+    report: { id: 'yuzPI1WHGOcpzljg', name: 'Triage analytics — report' },
+  });
+  // The names must be the workflows' OWN names, or the resource locator shows
+  // one workflow's name beside another's id.
+  assert.equal(buildIngestWorkflow().name, 'Triage analytics — ingest');
+  assert.equal(buildReportWorkflow().name, 'Triage analytics — report');
+});
+
+test('each sub-workflow carries an Execute Workflow Trigger that takes no input', () => {
+  for (const build of [buildIngestWorkflow, buildReportWorkflow]) {
+    const trigger = nodeNamed(build(), 'When executed by another workflow');
+    assert.ok(trigger, `${build().name} has no Execute Workflow Trigger and cannot be called`);
+    assert.equal(trigger.type, 'n8n-nodes-base.executeWorkflowTrigger');
+    assert.equal(trigger.typeVersion, 1.2, 'verified against the live instance');
+    // passthrough: neither sub-workflow reads caller input, so there is no
+    // input schema — and defining one would force the caller to send
+    // workflowInputs.
+    assert.deepEqual(trigger.parameters, { inputSource: 'passthrough' });
+  }
+});
+
+test('the ingest sub-workflow trigger starts BOTH branches, exactly as the schedule does', () => {
+  // The discriminator. The ingest schedule fans out to two concurrent
+  // branches. A sub-workflow trigger wired to only one of them runs half the
+  // workflow — it fetches without downloading the store, or downloads without
+  // fetching — and the orchestrated run still reports success.
+  const { connections } = buildIngestWorkflow();
+  const targets = name => connections[name].main[0].map(c => c.node);
+
+  assert.deepEqual(
+    targets('When executed by another workflow'),
+    ['Read state.json', 'Read issues.ndjson sha'],
+    'the sub-workflow trigger must start BOTH branch heads',
+  );
+  assert.equal(targets('When executed by another workflow').length, 2);
+  assert.deepEqual(
+    [...targets('When executed by another workflow')].sort(),
+    [...targets('Daily')].sort(),
+    'an orchestrated run must execute the same graph as the daily run',
+  );
+});
+
+test('the report sub-workflow trigger starts the same node the weekly schedule starts', () => {
+  const { connections } = buildReportWorkflow();
+  assert.deepEqual(
+    connections['When executed by another workflow'].main[0].map(c => c.node),
+    ['Read issues.ndjson'],
+  );
+  assert.deepEqual(
+    connections['When executed by another workflow'],
+    connections.Weekly,
+    'an orchestrated run must execute the same graph as the weekly run',
+  );
+});
+
+test('adding the sub-workflow trigger did not rewire either existing graph', () => {
+  // The whole existing graph, written out. A new trigger must ADD one key and
+  // change nothing else — including the Merge input indexes, which decide
+  // whether the barrier waits for both branches or neither.
+  const edge = node => ({ node, type: 'main', index: 0 });
+
+  assert.deepEqual(buildIngestWorkflow().connections, {
+    Daily: { main: [[edge('Read state.json'), edge('Read issues.ndjson sha')]] },
+    'When executed by another workflow': { main: [[edge('Read state.json'), edge('Read issues.ndjson sha')]] },
+    'Read state.json': { main: [[edge('Plan fetch')]] },
+    'Plan fetch': { main: [[edge('Fetch issues')]] },
+    'Read issues.ndjson sha': { main: [[edge('Read issues.ndjson')]] },
+    'Fetch issues': { main: [[{ node: 'Merge', type: 'main', index: 0 }]] },
+    'Read issues.ndjson': { main: [[{ node: 'Merge', type: 'main', index: 1 }]] },
+    Merge: { main: [[edge('Upsert store')]] },
+    'Upsert store': { main: [[edge('Write issues.ndjson')]] },
+    'Write issues.ndjson': { main: [[edge('Write state.json')]] },
+  });
+
+  assert.deepEqual(buildReportWorkflow().connections, {
+    Weekly: { main: [[edge('Read issues.ndjson')]] },
+    'When executed by another workflow': { main: [[edge('Read issues.ndjson')]] },
+    'Read issues.ndjson': { main: [[edge('Rollup and render')]] },
+    'Rollup and render': { main: [[edge('Read report sha')]] },
+    'Read report sha': { main: [[edge('Read report HTML sha')]] },
+    'Read report HTML sha': { main: [[edge('Read index.html sha')]] },
+    'Read index.html sha': { main: [[edge('Plan writes')]] },
+    'Plan writes': { main: [[edge('Write report')]] },
+    'Write report': { main: [[edge('Write report HTML')]] },
+    'Write report HTML': { main: [[edge('Write index.html')]] },
+  });
+});
+
+test('both existing workflows keep their schedule trigger and its cadence', () => {
+  // Adding an entry point must not replace one. If the Schedule Trigger were
+  // dropped, the daily and weekly cadences would stop the moment this shipped.
+  const daily = nodeNamed(buildIngestWorkflow(), 'Daily');
+  assert.equal(daily.type, 'n8n-nodes-base.scheduleTrigger');
+  assert.deepEqual(daily.parameters.rule.interval, [{ field: 'days', daysInterval: 1 }]);
+
+  const weekly = nodeNamed(buildReportWorkflow(), 'Weekly');
+  assert.equal(weekly.type, 'n8n-nodes-base.scheduleTrigger');
+  assert.deepEqual(weekly.parameters.rule.interval,
+    [{ field: 'weeks', weeksInterval: 1, triggerAtDay: [1], triggerAtHour: 8 }]);
+});
+
+test('the orchestrator runs the ingest FIRST and the report SECOND', () => {
+  // The one assertion this workflow exists for. It reads the order off the
+  // WIRES and then resolves each step to the workflow id it actually calls, so
+  // it fails both when the nodes are swapped and when the two ids are.
+  const orchestrator = buildOrchestratorWorkflow();
+  const order = executionOrder(orchestrator, 'Weekly');
+  assert.deepEqual(order, ['Weekly', 'Run ingest', 'Run report']);
+
+  const calledIds = order
+    .map(name => nodeNamed(orchestrator, name))
+    .filter(node => node.type === 'n8n-nodes-base.executeWorkflow')
+    .map(node => node.parameters.workflowId.value);
+
+  assert.deepEqual(calledIds, ['AE9bsoYqgcFuz1T3', 'yuzPI1WHGOcpzljg'],
+    'the ingest must run before the report, or the report renders last week\'s store');
+});
+
+test('each Execute Workflow node points at the workflow its name claims', () => {
+  const orchestrator = buildOrchestratorWorkflow();
+  for (const [nodeName, id, cachedResultName] of ORCHESTRATOR_STEPS) {
+    const node = nodeNamed(orchestrator, nodeName);
+    assert.ok(node, `the orchestrator has no "${nodeName}" node`);
+    assert.equal(node.type, 'n8n-nodes-base.executeWorkflow');
+    assert.equal(node.typeVersion, 1.3, 'verified against the live instance');
+    // A resource locator, not a bare string. n8n reads `value` for the id.
+    assert.deepEqual(node.parameters.workflowId,
+      { __rl: true, mode: 'id', value: id, cachedResultName });
+  }
+
+  // The two ids must differ. Both pointing at one workflow would run it twice
+  // and never produce a report.
+  const ids = ORCHESTRATOR_STEPS.map(([name]) =>
+    nodeNamed(orchestrator, name).parameters.workflowId.value);
+  assert.equal(new Set(ids).size, 2);
+
+  // The cached names are the sub-workflows' real names, so the editor cannot
+  // show one workflow's name beside another's id.
+  assert.equal(nodeNamed(orchestrator, 'Run ingest').parameters.workflowId.cachedResultName,
+    buildIngestWorkflow().name);
+  assert.equal(nodeNamed(orchestrator, 'Run report').parameters.workflowId.cachedResultName,
+    buildReportWorkflow().name);
+});
+
+test('every Execute Workflow node waits for its sub-workflow to finish', () => {
+  // Set explicitly although true is the current default. Without the wait,
+  // "Run report" starts while the ingest is still fetching and publishes a
+  // report over the PREVIOUS store — silently, with a green run.
+  for (const [nodeName] of ORCHESTRATOR_STEPS) {
+    const node = nodeNamed(buildOrchestratorWorkflow(), nodeName);
+    assert.ok('options' in node.parameters,
+      `${nodeName} leaves waitForSubWorkflow to the n8n default`);
+    assert.equal(node.parameters.options.waitForSubWorkflow, true,
+      `${nodeName} must block until its sub-workflow ends`);
+  }
+});
+
+test('every Execute Workflow node runs once, from the database, with NO workflowInputs', () => {
+  for (const [nodeName] of ORCHESTRATOR_STEPS) {
+    const { parameters } = nodeNamed(buildOrchestratorWorkflow(), nodeName);
+    assert.equal(parameters.mode, 'once', 'one sub-execution, not one per item');
+    assert.equal(parameters.source, 'database', 'the sub-workflow is the one stored on this instance');
+    // Both triggers are "passthrough", so there is no input schema to fill.
+    // The UI initialises this field to { mappingMode: 'defineBelow', value: null }
+    // before a schema loads, and that half-built state must never be committed.
+    assert.ok(!('workflowInputs' in parameters),
+      `${nodeName} emits workflowInputs, which must be absent for a passthrough trigger`);
+  }
+});
+
+test('the orchestrator matches the report cadence it replaces', () => {
+  const orchestrator = buildOrchestratorWorkflow();
+  assert.equal(orchestrator.name, 'Triage analytics — sync and report');
+  assert.equal(orchestrator.active, false);
+
+  const trigger = nodeNamed(orchestrator, 'Weekly');
+  assert.equal(trigger.type, 'n8n-nodes-base.scheduleTrigger');
+  assert.equal(trigger.typeVersion, 1.4);
+  // Monday 08:00, weekly — the same slot the report already runs in, so
+  // swapping to the orchestrator does not move the publish time.
+  assert.deepEqual(trigger.parameters.rule.interval,
+    [{ field: 'weeks', weeksInterval: 1, triggerAtDay: [1], triggerAtHour: 8 }]);
+  assert.deepEqual(trigger.parameters.rule.interval,
+    nodeNamed(buildReportWorkflow(), 'Weekly').parameters.rule.interval);
+
+  // Three nodes, no more. An orchestrator that grew logic of its own would be
+  // duplicating what the sub-workflows already do.
+  assert.deepEqual(orchestrator.nodes.map(n => n.name), ['Weekly', 'Run ingest', 'Run report']);
+});
+
+test('the second Execute Workflow node explains why it must not start early', () => {
+  // The ordering constraint is invisible in the editor: both orders draw the
+  // same two boxes. The note is where a reader learns that swapping them
+  // publishes stale data without failing.
+  const note = nodeNamed(buildOrchestratorWorkflow(), 'Run report').notes;
+  assert.ok(note, '"Run report" carries no note');
+  assert.match(note, /must not start before/i);
+  assert.match(note, /stale/i);
+  assert.match(note, /waitForSubWorkflow/);
+});
+
+test('the build emits exactly three workflow files', () => {
+  assert.deepEqual(GENERATED_WORKFLOWS.map(([file]) => file),
+    ['ingest.json', 'report.json', 'orchestrator.json']);
 });
 
 // --- The committed files ----------------------------------------------------

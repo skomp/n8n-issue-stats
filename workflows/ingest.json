@@ -21,6 +21,20 @@
       }
     },
     {
+      "name": "When executed by another workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        340
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "notes": "The second entry point, used by \"Triage analytics — sync and report\". It fans out to BOTH branch heads, exactly as \"Daily\" does — wired to only one of them, an orchestrated run would fetch without downloading the store (or the reverse) and still report success. The daily schedule is untouched: n8n fires each trigger as its own isolated execution.",
+      "notesInFlow": false
+    },
+    {
       "name": "Read state.json",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
@@ -301,6 +315,22 @@
   ],
   "connections": {
     "Daily": {
+      "main": [
+        [
+          {
+            "node": "Read state.json",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read issues.ndjson sha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When executed by another workflow": {
       "main": [
         [
           {

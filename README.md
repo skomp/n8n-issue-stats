@@ -54,7 +54,7 @@ constraints → deploy and run the recurring workflows in n8n Cloud.
 ## Quick start
 
 ```bash
-npm test                                        # 167 tests, zero dependencies
+npm test                                        # 187 tests, zero dependencies
 GITHUB_TOKEN=$(gh auth token) npm run backfill  # one-off, ~3.5 min, writes data/issues.ndjson
 ```
 
@@ -103,6 +103,11 @@ skomp/n8n-data ────►│ HTTP Request (store read) ┘   (upsert)   │
                     └──────────────────────────────────────────┘
                     ┌─ n8n Cloud, weekly ──────────────────────┐
 skomp/n8n-data ────►│ HTTP Request → Code (rollup + render)    │──► skomp/n8n-reports
+                    └──────────────────────────────────────────┘
+                    ┌─ n8n Cloud, weekly ──────────────────────┐
+                    │ Execute Workflow (ingest, waits)         │
+                    │        ↓                                 │
+                    │ Execute Workflow (report)                │
                     └──────────────────────────────────────────┘
 ```
 
@@ -178,9 +183,61 @@ the tokens redefined under `prefers-color-scheme: dark`. Every interpolated
 value is escaped: component names are GitHub label names, chosen outside this
 repo.
 
-`build/build-workflows.js` generates the two workflows by inlining `src/lib/*`
+`build/build-workflows.js` generates all three workflows by inlining `src/lib/*`
 source into their Code nodes, so **the deployed logic cannot drift from the
 tested logic**. There is one implementation, not two.
+
+### The orchestrator runs the two in sequence
+
+```
+Weekly ─► Run ingest ─► Run report
+          (waits)
+```
+
+`Triage analytics — sync and report` syncs the store and then publishes a report
+from it, in one execution. It holds no logic of its own — three nodes, two of
+which are Execute Workflow calls.
+
+The ingest and the report are callable because each now carries a **second
+trigger**: an Execute Workflow Trigger (typeVersion 1.2, `inputSource:
+"passthrough"`) beside its existing Schedule Trigger. n8n allows several
+triggers on one workflow and fires each as its own isolated execution, so the
+daily and weekly schedules behave exactly as before. The ingest's schedule fans
+out to two concurrent branches, and its Execute Workflow Trigger fans out to
+**both of them** — wired to one, an orchestrated run would fetch without
+downloading the store and still report success.
+
+`Run ingest` sets `options.waitForSubWorkflow: true` **explicitly**, although
+`true` is the current n8n default. Sequential execution is the whole point of
+this workflow: without the wait, `Run report` starts while the ingest is still
+fetching and publishes a report over the **previous** week's store. Nothing
+fails, the run is green, and the only symptom is a report that is quietly a week
+behind. Leaving that to a default is betting the report's correctness on a
+default never changing.
+
+Neither Execute Workflow node sends `workflowInputs`. Both triggers are
+`passthrough`, so there is no input schema to fill, and the editor's
+`{ mappingMode: "defineBelow", value: null }` is a UI initialisation state that
+must never reach committed JSON.
+
+### Activate the orchestrator or the individual schedules, never both
+
+All three workflows carry a Schedule Trigger, and the orchestrator runs in the
+**same weekly slot as the report** — Monday 08:00. Publishing a workflow is what
+activates its schedule.
+
+> **Publish either the orchestrator, or the ingest and the report. Not both.**
+> With all three published the report runs **twice a week**: once from its own
+> weekly schedule and once from the orchestrator.
+
+Nothing is published today, so nothing is currently broken. The duplicate run
+would not corrupt anything either — every write is an idempotent upsert — but it
+doubles the GitHub API cost and publishes a second report for the same date.
+
+| What you want | Publish | Leave unpublished |
+|---|---|---|
+| A daily sync and a weekly report, independently scheduled | ingest, report | orchestrator |
+| One weekly run that syncs and then reports | orchestrator | ingest, report |
 
 ### Layout
 
@@ -195,7 +252,7 @@ src/lib/report.js     Markdown and HTML rendering
 src/backfill.js       One-off historical load (local)
 src/sync.js           Incremental sync with watermark
 build/                Workflow generator
-workflows/            Generated n8n workflow JSON
+workflows/            Generated n8n workflow JSON (ingest, report, orchestrator)
 scripts/deploy.sh     REST deploy (needs a paid n8n plan — see below)
 ```
 
@@ -230,7 +287,7 @@ population}` so every table can print the denominator it actually used.
 
 ## What the tests are for
 
-167 tests, and the number is not the point. Partway through, a mutation review
+187 tests, and the number is not the point. Partway through, a mutation review
 seeded 17 deliberate bugs into a suite of 42 passing tests. **14 of them
 survived with the suite fully green** — including deleting the `mergedAt`
 filter, the single most load-bearing rule in the codebase.
@@ -240,6 +297,18 @@ that every rule has a test that has been *watched failing* against a broken
 implementation, and the suite now catches all of them. If you change something
 here, hold that standard: **a test you have only ever seen pass has proven
 nothing.**
+
+The orchestrator's tests were built that way too. Twenty-two mutations were
+applied to `build/build-workflows.js` and every one turned the suite red:
+`waitForSubWorkflow` set to `false`, removed, or the whole `options` object
+dropped; the two Execute Workflow nodes swapped on the wire and swapped in the
+nodes array; either `workflowId` pointing at the other workflow, or one
+character wrong; the ingest's Execute Workflow Trigger wired to one branch head
+instead of two; the report's wired to the wrong node; a `workflowInputs` object
+emitted; either node version changed; `mode` changed to `each`; `source` changed
+to `parameter`; `inputSource` changed off `passthrough`; the trigger replaced by
+a NoOp; a Schedule Trigger deleted; the cadence moved to daily; the ordering
+note stripped; and `orchestrator.json` dropped from the build.
 
 Fixtures are 10 real records pulled from the live API plus 3 synthetic ones
 (numbers `9000xx`) covering branches real data does not exercise. Assertions are
@@ -276,8 +345,15 @@ claude mcp add --transport http n8n https://<instance>.app.n8n.cloud/mcp-server/
 ```
 
 Node type versions are read from the live instance rather than assumed —
-`scheduleTrigger` 1.4, `httpRequest` 4.5, `code` 2, `merge` 3.2. All three
-initial guesses were wrong, two of them silently.
+`scheduleTrigger` 1.4, `httpRequest` 4.5, `code` 2, `merge` 3.2,
+`executeWorkflow` 1.3, `executeWorkflowTrigger` 1.2. All three initial guesses
+were wrong, two of them silently.
+
+The orchestrator addresses its two sub-workflows **by id**
+(`AE9bsoYqgcFuz1T3` and `yuzPI1WHGOcpzljg`), not by name. Those ids are
+deployment facts: a wrong id points the orchestrator at a different workflow and
+the run still succeeds. `SUB_WORKFLOWS` in `build/build-workflows.js` is the one
+place they are written down.
 
 ## Limits worth stating plainly
 

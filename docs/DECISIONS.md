@@ -193,3 +193,39 @@ adds both of those failure modes for no gain.
 
 The writes stay ordered dated-first, `index.html` **last**: it is the pointer at
 the archive and must not be advanced to a report the archive does not have.
+
+**A third workflow runs the other two in sequence (2026-09-06).**
+`Triage analytics — sync and report` (slug `n8n-triage-orchestrator`,
+`workflows/orchestrator.json`) holds a weekly Schedule Trigger and two Execute
+Workflow nodes, typeVersion 1.3: `Run ingest`, then `Run report`. It carries no
+logic of its own.
+
+To be callable at all, a workflow needs an **Execute Workflow Trigger**. Both
+sub-workflows now carry one (typeVersion 1.2, `inputSource: "passthrough"`)
+beside the Schedule Trigger they already had. n8n supports several triggers on
+one workflow and fires each as its own isolated execution, so the daily and
+weekly cadences are unchanged. The ingest's Execute Workflow Trigger fans out to
+**both** branch heads, exactly as `Daily` does — wired to one, an orchestrated
+run would fetch without downloading the store and still report success.
+
+`waitForSubWorkflow` is set **explicitly to true** on both Execute Workflow
+nodes although true is the current n8n default. Sequential execution is the only
+reason this workflow exists: without the wait, `Run report` renders from the
+store as it was **before** this week's sync, and the run is green. That is a
+correctness property, not a default to inherit.
+
+`workflowInputs` is deliberately **absent**. Both triggers are `passthrough`, so
+there is no input schema, and the editor's
+`{ mappingMode: "defineBelow", value: null }` is a UI initialisation state, not
+a configuration.
+
+The sub-workflows are addressed by **id** in a resource locator
+(`{ __rl: true, mode: "id", value, cachedResultName }`), so a wrong id points at
+a different workflow and the run still succeeds. The ids live once, in
+`SUB_WORKFLOWS` in `build/build-workflows.js`, and each workflow's own name is
+read back from there as the `cachedResultName`.
+
+**Consequence: the schedules now overlap.** All three workflows carry a
+`scheduleTrigger`, and the orchestrator uses the report's slot (Monday 08:00).
+Publish the orchestrator, **or** the ingest and the report — never both, or the
+report runs twice a week. Nothing is published today, so nothing is broken.

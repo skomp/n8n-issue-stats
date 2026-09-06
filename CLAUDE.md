@@ -14,14 +14,27 @@ Push directly to `main`. No pull request required for this project.
 ## Workflow deployment
 
 The n8n workflows are **deployed but deliberately unpublished** — nothing runs
-on a schedule. Both carry a `scheduleTrigger`, so publishing a workflow is what
-activates its schedule. Run them manually from the n8n editor until that
+on a schedule. All three carry a `scheduleTrigger`, so publishing a workflow is
+what activates its schedule. Run them manually from the n8n editor until that
 changes.
 
-| Workflow | id |
-|---|---|
-| Triage analytics — report | `yuzPI1WHGOcpzljg` |
-| Triage analytics — ingest | `AE9bsoYqgcFuz1T3` |
+| Workflow | File | id |
+|---|---|---|
+| Triage analytics — report | `workflows/report.json` | `yuzPI1WHGOcpzljg` |
+| Triage analytics — ingest | `workflows/ingest.json` | `AE9bsoYqgcFuz1T3` |
+| Triage analytics — sync and report | `workflows/orchestrator.json` | not deployed yet |
+
+The third workflow (slug `n8n-triage-orchestrator`) runs the other two in
+sequence. Both of those carry a second trigger, an `executeWorkflowTrigger`, so
+they can be called as sub-workflows. Their ids are written down once, in
+`SUB_WORKFLOWS` in `build/build-workflows.js`, and the orchestrator's Execute
+Workflow nodes read them from there.
+
+**Publish the orchestrator, or the ingest and the report. Never both.** The
+orchestrator runs in the same weekly slot as the report (Monday 08:00), so with
+all three published the report runs twice a week.
+
+When the orchestrator is deployed, record its id in the table above.
 
 Deployment goes through the instance MCP server, not the public REST API —
 the API is unavailable on the n8n Cloud free trial, the MCP server is not

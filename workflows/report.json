@@ -25,6 +25,20 @@
       }
     },
     {
+      "name": "When executed by another workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "notes": "The second entry point, used by \"Triage analytics — sync and report\". It starts the same node the weekly schedule starts, so an orchestrated run and a scheduled run execute an identical graph. The weekly schedule is untouched: n8n fires each trigger as its own isolated execution.",
+      "notesInFlow": false
+    },
+    {
       "name": "Read issues.ndjson",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
@@ -318,6 +332,17 @@
   ],
   "connections": {
     "Weekly": {
+      "main": [
+        [
+          {
+            "node": "Read issues.ndjson",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When executed by another workflow": {
       "main": [
         [
           {

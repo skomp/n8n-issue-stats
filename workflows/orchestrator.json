@@ -1,0 +1,104 @@
+{
+  "name": "Triage analytics — sync and report",
+  "nodes": [
+    {
+      "name": "Weekly",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Run ingest",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "AE9bsoYqgcFuz1T3",
+          "cachedResultName": "Triage analytics — ingest"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Runs the ingest sub-workflow to completion and only then returns. It reaches the ingest through that workflow's Execute Workflow Trigger, which fans out to both of its branches, so an orchestrated run does exactly what the daily schedule does.",
+      "notesInFlow": false
+    },
+    {
+      "name": "Run report",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "yuzPI1WHGOcpzljg",
+          "cachedResultName": "Triage analytics — report"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "MUST NOT START BEFORE \"Run ingest\" HAS FINISHED. The report is rendered from issues.ndjson, which the ingest rewrites; started early it reads the store as it was BEFORE this week's sync and publishes a report over stale data. Nothing fails and the run is green — the only symptom is a report that is quietly a week behind. Two things enforce the order: this node is downstream of \"Run ingest\" on the wire, and \"Run ingest\" sets options.waitForSubWorkflow explicitly, so it blocks until the ingest sub-execution ends instead of firing it and continuing.",
+      "notesInFlow": false
+    }
+  ],
+  "connections": {
+    "Weekly": {
+      "main": [
+        [
+          {
+            "node": "Run ingest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run ingest": {
+      "main": [
+        [
+          {
+            "node": "Run report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
