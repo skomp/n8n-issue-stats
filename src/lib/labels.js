@@ -19,6 +19,13 @@ export const CLOSED_LABELS = [
 
 export const ALL_FILTER_LABELS = [...TRIAGE_LABELS, ...TEAM_LABELS, ...CLOSED_LABELS];
 
+// Spec section 8 headline: the rejection reasons which say the issue should
+// never have been filed as a bug at all. A subset of CLOSED_LABELS. An issue
+// carrying two of them is counted once.
+export const SHOULD_NOT_HAVE_BEEN_FILED = [
+  'closed:incomplete-template', 'closed:support-issue', 'closed:non-english',
+];
+
 // Retained deliberately: these matched ZERO issues in the measured population
 // because they never co-occur with the 33 filter labels. They cost nothing and
 // n8n's labelling may change. Do not delete them assuming they are broken.

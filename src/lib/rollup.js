@@ -1,4 +1,5 @@
 import { segmentOf, componentOf } from './classify.js';
+import { SHOULD_NOT_HAVE_BEEN_FILED } from './labels.js';
 import { leadTimes, median, p90 } from './metrics.js';
 
 const bump = (obj, key) => { obj[key] = (obj[key] ?? 0) + 1; };
@@ -8,6 +9,7 @@ export function rollup(issues) {
   const segments = { accepted: 0, rejected: 0 };
   const rejectionReasons = {}, components = {}, triageStates = {}, byMonth = {};
   const close = [], fix = [], pr = [];
+  let shouldNotHaveBeenFiled = 0;
 
   for (const issue of issues) {
     const segment = segmentOf(issue);
@@ -18,6 +20,9 @@ export function rollup(issues) {
       if (n.startsWith('closed:')) bump(rejectionReasons, n);
       if (n.startsWith('triage:')) bump(triageStates, n);
     }
+
+    // Counted once per issue, however many of the three reasons it carries.
+    if (names.some(n => SHOULD_NOT_HAVE_BEEN_FILED.includes(n))) shouldNotHaveBeenFiled += 1;
 
     if (segment === 'accepted') bump(components, componentOf(issue));
 
@@ -38,6 +43,10 @@ export function rollup(issues) {
   return {
     total: issues.length,
     segments,
+    headline: {
+      shouldNotHaveBeenFiled,
+      shareOfPopulation: issues.length === 0 ? 0 : shouldNotHaveBeenFiled / issues.length,
+    },
     rejectionReasons,
     components,
     componentCoverage: segments.accepted === 0 ? 0 : classified / segments.accepted,

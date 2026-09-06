@@ -12,14 +12,25 @@ export function reportPath(date) {
   return `reports/${date.toISOString().slice(0, 10)}-triage.md`;
 }
 
+// The accepted:rejected ratio, expressed as accepted issues per rejected issue.
+// Undefined when nothing was rejected, which prints as an em dash.
+const ratio = (a, b) => b === 0 ? '\u2014' : (a / b).toFixed(2);
+
 export function renderReport(r, { generatedAt }) {
   const { total, segments: s } = r;
   const lt = r.leadTimes;
+  const h = r.headline;
+  const triaged = Object.values(r.triageStates).reduce((a, b) => a + b, 0);
 
   return `# n8n triage report — ${generatedAt.slice(0, 10)}
 
 Population: **${total}** triaged issues from \`n8n-io/n8n\`.
 Generated ${generatedAt}.
+
+## Headline
+
+- **${s.accepted} accepted** to **${s.rejected} rejected** \u2014 a ratio of **${ratio(s.accepted, s.rejected)}** accepted issues per rejected issue, out of ${total} triaged issues.
+- **${h.shouldNotHaveBeenFiled}** ${h.shouldNotHaveBeenFiled === 1 ? 'issue' : 'issues'} (**${pct(h.shouldNotHaveBeenFiled, total)}** of ${total}) should never have been filed as a bug. n8n closed them as \`closed:incomplete-template\`, \`closed:support-issue\` or \`closed:non-english\`. An issue carrying more than one of those reasons is counted once.
 
 ## Intake and outcome
 
@@ -30,9 +41,10 @@ ${table(['Segment', 'Issues', 'Share'], [
 
 ## Rejection reasons
 
-${table(['Reason', 'Issues'], sortedEntries(r.rejectionReasons))}
+${table(['Reason', 'Issues', 'Share of rejected'],
+  sortedEntries(r.rejectionReasons).map(([k, v]) => [k, v, pct(v, s.rejected)]))}
 
-An issue may carry more than one reason, so these need not sum to ${s.rejected}.
+Denominator: all **${s.rejected}** rejected issues. An issue may carry more than one reason, so the counts need not sum to ${s.rejected} and the shares need not sum to 100%.
 
 ## Component
 
@@ -42,7 +54,10 @@ ${table(['Component', 'Issues'], sortedEntries(r.components))}
 
 ## Triage funnel
 
-${table(['State', 'Issues'], sortedEntries(r.triageStates))}
+${table(['State', 'Issues', 'Share'],
+  sortedEntries(r.triageStates).map(([k, v]) => [k, v, pct(v, total)]))}
+
+Denominator: all **${total}** triaged issues. ${triaged} carry a \`triage:*\` label and appear above; the other ${total - triaged} carry none and appear in no row.
 
 ## Lead times
 
@@ -56,8 +71,11 @@ ${table(['Measure', 'Median (days)', 'p90 (days)', 'n'], [
 
 ## Monthly intake
 
-${table(['Month', 'Accepted', 'Rejected'],
-  Object.entries(r.byMonth).sort(([a], [b]) => a.localeCompare(b)).map(([m, v]) => [m, v.accepted, v.rejected]))}
+${table(['Month', 'Accepted', 'Rejected', 'Total', 'Share'],
+  Object.entries(r.byMonth).sort(([a], [b]) => a.localeCompare(b))
+    .map(([m, v]) => [m, v.accepted, v.rejected, v.accepted + v.rejected, pct(v.accepted + v.rejected, total)]))}
+
+Denominator: all **${total}** triaged issues, keyed by the month the issue was opened.
 
 ## Coverage and caveats
 
