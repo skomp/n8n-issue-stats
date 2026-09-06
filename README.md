@@ -88,7 +88,7 @@ item is fine; 5,464 items are not.
 
 | Repo | Holds |
 |---|---|
-| `skomp/n8n-test` (this) | Library, CLIs, workflow generator, deploy script |
+| `skomp/n8n-issue-stats` (this) | Library, CLIs, workflow generator, deploy script |
 | `skomp/n8n-data` | `issues.ndjson` (5,464 records, 2.9 MB) and `state.json` (sync watermark) |
 | `skomp/n8n-reports` | `reports/YYYY-MM-DD-triage.{md,html}` and `index.html` (GitHub Pages) |
 
@@ -176,7 +176,7 @@ Every `Read ... sha` node sets `neverError` (so a 404 does not fail the run) and
 file, so each write carries the sha of its own path and never a neighbour's.
 
 The dated paths carry the **date**, not the run. Before
-[#2](https://github.com/skomp/n8n-test/issues/2) only `index.html` read its sha
+[#2](https://github.com/skomp/n8n-issue-stats/issues/2) only `index.html` read its sha
 first, so a same-day re-run replaced the published page while both dated files
 failed with 422 and kept their first-run content — the Pages site and the
 archive then disagreed. The fix overwrites with a conditional sha rather than
@@ -397,7 +397,7 @@ claude mcp add --transport http n8n https://<instance>.app.n8n.cloud/mcp-server/
 ### What `deploy.sh` was fixed for, and what that fix does not prove
 
 Two defects were found by reading n8n's schema rather than by running anything
-([#8](https://github.com/skomp/n8n-test/issues/8)):
+([#8](https://github.com/skomp/n8n-issue-stats/issues/8)):
 
 1. **The body carried a rejected property.** The generated files hold
    `active: false` at the top level. `active` is `readOnly: true` in the
@@ -447,7 +447,7 @@ repositories, not asserted from a green test run.
 | Workflow | id | Runs | What it proved |
 |---|---|---|---|
 | Ingest | `AE9bsoYqgcFuz1T3` | 3 | Cursor pagination over **5 pages — 439 issues, 0 duplicates**. Issue numbers advance strictly across pages, so the cursor is genuinely carried. The Merge barrier emits exactly one empty item and the 2.9 MB store is not copied through it. |
-| Report | `yuzPI1WHGOcpzljg` | 3 | Three idempotent writes. Two same-day re-runs left `index.html` byte-identical to the dated archive — the defect in [#2](https://github.com/skomp/n8n-test/issues/2). |
+| Report | `yuzPI1WHGOcpzljg` | 3 | Three idempotent writes. Two same-day re-runs left `index.html` byte-identical to the dated archive — the defect in [#2](https://github.com/skomp/n8n-issue-stats/issues/2). |
 | Orchestrator | `n3cSgsUgaLDg23Wg` | 1 | Sequential execution, proven by commit timestamps: the ingest's last write landed at `12:52:47`, the report's first at `12:52:50`. `waitForSubWorkflow` is honoured in practice, not merely set in config. |
 
 Store integrity held throughout: 5,464 records before and after a 439-record

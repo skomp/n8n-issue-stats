@@ -737,7 +737,7 @@ test('planWrite refuses a response with no status code at all', () => {
 });
 
 test('ALL THREE sha reads tolerate a 404 and keep the status code', () => {
-  // skomp/n8n-test#2: index.html was the only path that read its sha first.
+  // skomp/n8n-issue-stats#2: index.html was the only path that read its sha first.
   // The two dated files did not, so a same-day re-run 422'd on both and left
   // them at their first-run content while index.html advanced.
   const wf = buildReportWorkflow();
@@ -889,7 +889,7 @@ test('a first-ever run creates all three files, none of them with a sha', () => 
 });
 
 test('a SAME-DAY RE-RUN overwrites all three files, each with its OWN sha', () => {
-  // This is skomp/n8n-test#2. Before the fix the two dated writes sent no sha
+  // This is skomp/n8n-issue-stats#2. Before the fix the two dated writes sent no sha
   // whatever the read said, so GitHub answered 422 and both files kept their
   // first-run content while index.html was replaced.
   //

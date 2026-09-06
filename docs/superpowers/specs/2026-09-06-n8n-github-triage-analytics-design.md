@@ -153,7 +153,7 @@ triage**, not delivery. Do not present it as a measure of engineering output.
 
 | Repo | Contents |
 |---|---|
-| `skomp/n8n-test` | Workflow JSON, deploy script, this spec |
+| `skomp/n8n-issue-stats` | Workflow JSON, deploy script, this spec |
 | `skomp/n8n-data` | `issues.ndjson`, `state.json` (watermark) |
 | `skomp/n8n-reports` | `reports/YYYY-MM-DD-triage.md`, `reports/YYYY-MM-DD-triage.html`, `index.html` |
 
@@ -178,7 +178,7 @@ rather than at a Pages directory URL.
 
 All three writes are **idempotent upserts**: each read its existing sha before
 writing, so a same-day re-run replaces the file instead of failing. See
-`skomp/n8n-test#2`.
+`skomp/n8n-issue-stats#2`.
 
 ### Moving parts
 
@@ -191,7 +191,7 @@ writing, so a same-day re-run replaces the file instead of failing. See
 3. **Report workflow** — n8n Cloud, scheduled weekly (confirmed). Reads the store,
    computes rollups, renders markdown **and HTML** (amended 2026-09-06), commits
    all three files to `n8n-reports`.
-4. **Deploy script** — runs locally. Pushes workflow JSON from `n8n-test`
+4. **Deploy script** — runs locally. Pushes workflow JSON from `n8n-issue-stats`
    to n8n Cloud through the public API.
 
 #### Three workflows, not two — amended 2026-09-06

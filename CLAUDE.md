@@ -2,7 +2,7 @@
 
 ## Issue tracking
 
-**GitHub issues**, in `skomp/n8n-test`. Not a `TODO.md`.
+**GitHub issues**, in `skomp/n8n-issue-stats`. Not a `TODO.md`.
 
 Label every issue Claude creates with `created-by-claude` so automatically
 created issues stay identifiable.

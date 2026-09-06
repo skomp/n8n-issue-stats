@@ -401,7 +401,7 @@ export function buildReportPayload(storeText, generatedAtISO) {
 //   reports/YYYY-MM-DD-triage.html     not per RUN. A second run on the same
 //                                      day hits an existing file and 422s.
 //
-// That asymmetry was the defect (skomp/n8n-test#2): a same-day re-run updated
+// That asymmetry was the defect (skomp/n8n-issue-stats#2): a same-day re-run updated
 // index.html — which supplied a sha and so succeeded — while both dated files
 // 422'd and kept their first-run content. The published page and the archived
 // report for that date then disagreed.
@@ -899,7 +899,7 @@ function buildPlanWritesCode() {
 //
 // The dated paths contain the DATE, not the run, so a second run on the same
 // day finds them present and must overwrite them with their current sha. That
-// is the whole of skomp/n8n-test#2: index.html used to be the only path that
+// is the whole of skomp/n8n-issue-stats#2: index.html used to be the only path that
 // did this, so a same-day re-run advanced the published page while both dated
 // files stayed at their first-run content.
 const payload = $('Rollup and render').first().json;
@@ -1271,7 +1271,7 @@ export function buildReportWorkflow() {
       notes:
         'An idempotent upsert. "Plan writes" includes the sha only when "Read report sha" returned ' +
         'one, so the first write of a date creates the file and a same-day re-run overwrites it. ' +
-        'Before skomp/n8n-test#2 this sent no sha at all and a same-day re-run failed with 422.',
+        'Before skomp/n8n-issue-stats#2 this sent no sha at all and a same-day re-run failed with 422.',
     }),
     httpRequestNode({
       name: 'Write report HTML',

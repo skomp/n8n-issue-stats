@@ -12,7 +12,7 @@ n8n Cloud as code, and memory-bounded so the aggregation cannot OOM again.
 ## Fixed context
 
 - n8n Cloud instance: `skomp.app.n8n.cloud`. Not self-hosted.
-- Project repo: `skomp/n8n-test` (public, empty).
+- Project repo: `skomp/n8n-issue-stats` (public, empty).
 - Data store repo: `skomp/n8n-data` (public, empty).
 - Reports repo: `skomp/n8n-reports` (public, empty).
 - Instance MCP server registered locally: `https://skomp.app.n8n.cloud/mcp-server/http`
@@ -152,7 +152,7 @@ None. Both earlier questions were resolved:
   that authorises over OAuth and is not tier-gated.
 - **Report cadence**: weekly, confirmed by the owner.
 
-Everything still outstanding is tracked as a GitHub issue in `skomp/n8n-test`.
+Everything still outstanding is tracked as a GitHub issue in `skomp/n8n-issue-stats`.
 
 ## Later decisions
 
@@ -168,7 +168,7 @@ Everything still outstanding is tracked as a GitHub issue in `skomp/n8n-test`.
 > neither can serve as evidence. The Merge barrier is still *required* for
 > correctness given the fan-out, and nothing is harmed — but the concurrency
 > claim is unmeasured and is tracked as
-> [#7](https://github.com/skomp/n8n-test/issues/7).
+> [#7](https://github.com/skomp/n8n-issue-stats/issues/7).
 
 The Merge is a **barrier, not a join**. `Fetch issues` emits one item per
 GraphQL page while the store branch emits one, so `combineAll` would produce an
@@ -195,7 +195,7 @@ needs a blob sha", on the reasoning that the dated paths are unique per run.
 They are not — they are unique per **day**. A same-day re-run therefore 422'd on
 both dated files while `index.html`, which did supply a sha, succeeded, and the
 published page disagreed with the archived report for that date. Reported as
-skomp/n8n-test#2 and hit during deployment on 2026-09-06, when the controller
+skomp/n8n-issue-stats#2 and hit during deployment on 2026-09-06, when the controller
 had to delete `reports/2026-09-06-triage.md` by hand before re-running.
 
 **Overwrite with a conditional sha, not delete-then-create (2026-09-06).** The
@@ -251,13 +251,13 @@ Pages serves the root from `main`, so https://skomp.github.io/n8n-reports/
 always shows the newest report. All three writes are idempotent upserts — each
 reads its blob sha first and omits it when the read 404s — so a same-day re-run
 leaves the published page and the archive in agreement
-([#2](https://github.com/skomp/n8n-test/issues/2)).
+([#2](https://github.com/skomp/n8n-issue-stats/issues/2)).
 
 The footer links to the archive at
 `https://github.com/skomp/n8n-reports/tree/main/reports`, **not** at a Pages
 path. GitHub Pages does not generate directory indexes, so
 `https://skomp.github.io/n8n-reports/reports/` returns 404 — publishing a real
-archive page is tracked as [#3](https://github.com/skomp/n8n-test/issues/3).
+archive page is tracked as [#3](https://github.com/skomp/n8n-issue-stats/issues/3).
 
 **Orchestrator (2026-09-06).** A third workflow runs ingest then report through
 `executeWorkflow` nodes with `waitForSubWorkflow: true`, so the report always
@@ -289,5 +289,5 @@ is the deployed code.
 **The script has still never run** — creating an API key is gated on the free
 trial. It conforms to the published schema and its logic is unit tested; that
 is a different claim from "known to work", and
-[#8](https://github.com/skomp/n8n-test/issues/8) stays open until it runs
+[#8](https://github.com/skomp/n8n-issue-stats/issues/8) stays open until it runs
 against a paid-plan instance.
