@@ -91,7 +91,9 @@ test('onPage is invoked once per page with running progress', async () => {
   assert.equal(calls[1].remaining, 4000);
 });
 
-// Minor 3: without the endCursor guard this test never returns.
+// Minor 3: without the endCursor guard this test never returns. A silent
+// `break` would also pass here, since it returns just as normally as a
+// complete result — so the guard must throw, not return short.
 test('fetchAll stops when the cursor stops advancing', async () => {
   let requests = 0;
   globalThis.fetch = async () => {
@@ -99,9 +101,10 @@ test('fetchAll stops when the cursor stops advancing', async () => {
     if (requests > 20) throw new Error('fetchAll did not terminate on a stalled cursor');
     return page([{ number: requests }], true, 'stuck');
   };
-  const res = await fetchAll({ token: 't' });
-  assert.equal(res.pages, 2);
-  assert.equal(res.issues.length, 2);
+  await assert.rejects(
+    () => fetchAll({ token: 't' }),
+    /stalled cursor "stuck".*2 page\(s\).*2 issue\(s\)/
+  );
 });
 
 test('a GraphQL errors array is thrown, not silently ignored', async () => {

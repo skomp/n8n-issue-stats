@@ -63,9 +63,16 @@ export async function fetchAll({ token, since = null, onPage = null }) {
     points += page.cost;
     if (onPage) onPage({ pages, points, received: issues.length, remaining: page.remaining });
     if (!page.hasNextPage) break;
-    // A repeated endCursor means the API cannot advance. Stop rather than
-    // loop forever against the rate limit.
-    if (page.endCursor === cursor) break;
+    // A repeated endCursor means the API cannot advance. A silent `break` here
+    // would return a short result indistinguishable from a complete one, and
+    // the caller would write a truncated store while reporting success. Throw
+    // instead, so the stall is diagnosable and cannot be mistaken for done.
+    if (page.endCursor === cursor) {
+      throw new Error(
+        `fetchAll: stalled cursor "${cursor}" did not advance after ${pages} page(s) ` +
+        `and ${issues.length} issue(s) collected`
+      );
+    }
     cursor = page.endCursor;
   }
 
