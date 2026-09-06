@@ -1,0 +1,10 @@
+{
+  "name": "n8n-triage-analytics",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/",
+    "backfill": "node src/backfill.js"
+  }
+}
