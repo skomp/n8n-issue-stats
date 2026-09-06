@@ -1,0 +1,219 @@
+{
+  "name": "Triage analytics — ingest",
+  "nodes": [
+    {
+      "name": "Daily",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Read state.json",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        -80
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.github.com/repos/skomp/n8n-data/contents/state.json",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "githubApi": {
+          "name": "GitHub PAT (triage analytics)"
+        }
+      }
+    },
+    {
+      "name": "Read issues.ndjson",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        80
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.github.com/repos/skomp/n8n-data/contents/issues.ndjson",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "githubApi": {
+          "name": "GitHub PAT (triage analytics)"
+        }
+      }
+    },
+    {
+      "name": "Sync",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const TRIAGE_LABELS = [\n  'triage:pending', 'triage:in-progress', 'triage:needs-info',\n  'triage:needs-reproduction', 'triage:ready-for-review', 'triage:complete',\n  'triage:stalled', 'triage:ping', 'triage:tests-needed',\n];\n\nconst TEAM_LABELS = [\n  'team:nodes', 'team:ai', 'team:api', 'team:iam', 'team:chat', 'team:design',\n  'team:qa-dx', 'team:lifecycle', 'team:relay', 'team:identity', 'team:cats',\n  'team:payday', 'team:adore', 'team:ins', 'team:instance-ai',\n];\n\nconst CLOSED_LABELS = [\n  'closed:duplicate', 'closed:cant-reproduce', 'closed:working-as-expected',\n  'closed:support-issue', 'closed:incomplete-template',\n  'closed:enhancement/feature', 'closed:info', 'closed:non-english',\n  'closed:requested',\n];\n\nconst ALL_FILTER_LABELS = [...TRIAGE_LABELS, ...TEAM_LABELS, ...CLOSED_LABELS];\n\n// Spec section 8 headline: the rejection reasons which say the issue should\n// never have been filed as a bug at all. A subset of CLOSED_LABELS. An issue\n// carrying two of them is counted once.\nconst SHOULD_NOT_HAVE_BEEN_FILED = [\n  'closed:incomplete-template', 'closed:support-issue', 'closed:non-english',\n];\n\n// Retained deliberately: these matched ZERO issues in the measured population\n// because they never co-occur with the 33 filter labels. They cost nothing and\n// n8n's labelling may change. Do not delete them assuming they are broken.\nconst ADHOC_COMPONENT_LABELS = [\n  'core', 'ui', 'dx', 'deployment', 'performance', 'security',\n];\n\n\n\nconst ISSUES_QUERY = `\nquery($cursor: String, $labels: [String!]!, $since: DateTime) {\n  rateLimit { cost remaining }\n  repository(owner: \"n8n-io\", name: \"n8n\") {\n    issues(first: 100, after: $cursor, labels: $labels,\n           filterBy: {since: $since},\n           orderBy: {field: UPDATED_AT, direction: ASC}) {\n      pageInfo { hasNextPage endCursor }\n      nodes {\n        number title state createdAt updatedAt closedAt\n        author { login }\n        labels(first: 30) { nodes { name } }\n        reactions { totalCount }\n        comments { totalCount }\n        closedByPullRequestsReferences(first: 5, includeClosedPrs: true) {\n          nodes { number createdAt mergedAt\n                  files(first: 100) { nodes { path } } }\n        }\n      }\n    }\n  }\n}`;\n\nasync function fetchPage({ token, cursor = null, since = null }) {\n  const res = await fetch('https://api.github.com/graphql', {\n    method: 'POST',\n    headers: {\n      Authorization: `Bearer ${token}`,\n      'Content-Type': 'application/json',\n      'User-Agent': 'skomp-n8n-triage-analytics',\n    },\n    body: JSON.stringify({\n      query: ISSUES_QUERY,\n      variables: { cursor, since, labels: ALL_FILTER_LABELS },\n    }),\n  });\n\n  if (!res.ok) throw new Error(`GitHub HTTP ${res.status}: ${await res.text()}`);\n\n  const body = await res.json();\n  if (body.errors) throw new Error(`GitHub GraphQL: ${body.errors.map(e => e.message).join('; ')}`);\n\n  const conn = body.data.repository.issues;\n  return {\n    nodes: conn.nodes,\n    endCursor: conn.pageInfo.endCursor,\n    hasNextPage: conn.pageInfo.hasNextPage,\n    cost: body.data.rateLimit.cost,\n    remaining: body.data.rateLimit.remaining,\n  };\n}\n\nasync function fetchAll({ token, since = null, onPage = null }) {\n  const issues = [];\n  let cursor = null, pages = 0, points = 0;\n\n  for (;;) {\n    const page = await fetchPage({ token, cursor, since });\n    issues.push(...page.nodes);\n    pages += 1;\n    points += page.cost;\n    if (onPage) onPage({ pages, points, received: issues.length, remaining: page.remaining });\n    if (!page.hasNextPage) break;\n    // A repeated endCursor means the API cannot advance. A silent `break` here\n    // would return a short result indistinguishable from a complete one, and\n    // the caller would write a truncated store while reporting success. Throw\n    // instead, so the stall is diagnosable and cannot be mistaken for done.\n    if (page.endCursor === cursor) {\n      throw new Error(\n        `fetchAll: stalled cursor \"${cursor}\" did not advance after ${pages} page(s) ` +\n        `and ${issues.length} issue(s) collected`\n      );\n    }\n    cursor = page.endCursor;\n  }\n\n  return { issues, pages, points };\n}\n\n\nfunction parseStore(text) {\n  const map = new Map();\n  for (const line of text.split('\\n')) {\n    const trimmed = line.trim();\n    if (!trimmed) continue;\n    const issue = JSON.parse(trimmed);\n    map.set(issue.number, issue);\n  }\n  return map;\n}\n\nfunction serialiseStore(map) {\n  return [...map.values()]\n    .sort((a, b) => a.number - b.number)\n    .map(i => JSON.stringify(i))\n    .join('\\n') + '\\n';\n}\n\nfunction upsert(map, issues) {\n  for (const issue of issues) map.set(issue.number, issue);\n  return map;\n}\n\nfunction watermarkOf(map) {\n  let max = null;\n  for (const issue of map.values()) {\n    if (issue.updatedAt && (max === null || issue.updatedAt > max)) max = issue.updatedAt;\n  }\n  return max;\n}\n\n\n\nconst OVERLAP_MS = 5 * 60 * 1000;\n\n// Deliberately re-fetch a 5-minute overlap. Duplicates are cheap because\n// upsert is keyed on issue number; a gap is silent and permanent.\nfunction overlapWindow(watermark) {\n  if (!watermark) return null;\n  return new Date(Date.parse(watermark) - OVERLAP_MS).toISOString().replace(/\\.\\d{3}Z$/, 'Z');\n}\n\nasync function syncSince(store, { token }) {\n  const since = overlapWindow(watermarkOf(store));\n  const { issues } = await fetchAll({ token, since });\n  upsert(store, issues);\n  return { store, fetched: issues.length, watermark: watermarkOf(store) };\n}\n\n\nfunction isStalledCursorError(err) {\n  return typeof err?.message === 'string' && err.message.startsWith('fetchAll: stalled cursor');\n}\n\nfunction isSecondaryRateLimitError(err) {\n  const msg = String(err?.message ?? '');\n  return /^GitHub HTTP 403:/.test(msg) && /secondary rate limit|abuse detection/i.test(msg);\n}\n\nasync function fetchAllWithRetry(fetchAllFn, opts, {\n  maxAttempts = 3,\n  waitMs = 5 * 60 * 1000,\n  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),\n} = {}) {\n  let lastErr;\n  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {\n    try {\n      return await fetchAllFn(opts);\n    } catch (err) {\n      // Hard failure: never retry. A stalled cursor will not un-stall itself.\n      if (isStalledCursorError(err)) throw err;\n      // Anything that is not the transient secondary rate limit is also a\n      // hard failure for this wrapper — only that one condition is retryable.\n      if (!isSecondaryRateLimitError(err) || attempt === maxAttempts) throw err;\n      lastErr = err;\n      await sleep(waitMs);\n    }\n  }\n  throw lastErr;\n}\n\nasync function runIngest({ stateText, storeText, token, fetchAllFn = fetchAll }) {\n  const store = parseStore(storeText ?? '');\n  const state = stateText ? JSON.parse(stateText) : {};\n  const since = overlapWindow(state.watermark ?? watermarkOf(store));\n  const { issues, pages, points } = await fetchAllWithRetry(fetchAllFn, { token, since });\n  upsert(store, issues);\n  const watermark = watermarkOf(store);\n  return {\n    storeText: serialiseStore(store),\n    stateText: JSON.stringify({ watermark }, null, 2) + '\\n',\n    fetched: issues.length,\n    pages,\n    points,\n    watermark,\n  };\n}\n\n// --- n8n driver ---------------------------------------------------------\n// This node receives one item per upstream HTTP Request (the GitHub Contents\n// API responses for state.json and issues.ndjson, connected into the same\n// input). It reads both, runs the sync, and returns a SINGLE item: the two\n// downstream \"Write\" HTTP Request nodes both read their own field off this\n// one item, so the item count does not multiply with store size.\nconst inputs = $input.all();\nconst stateItem = inputs.find(i => typeof i.json.path === 'string' && i.json.path.endsWith('state.json'));\nconst storeItem = inputs.find(i => typeof i.json.path === 'string' && i.json.path.endsWith('issues.ndjson'));\n\nconst stateText = stateItem ? Buffer.from(stateItem.json.content, 'base64').toString('utf8') : null;\nconst storeText = storeItem ? Buffer.from(storeItem.json.content, 'base64').toString('utf8') : '';\n// ASSUMPTION (unverifiable on the free trial): the instance permits Code-node\n// access to environment variables. Verify against N8N_BLOCK_ENV_ACCESS_IN_NODE.\nconst token = $env.GITHUB_TOKEN;\n\nconst result = await runIngest({ stateText, storeText, token });\n\nreturn [{\n  json: {\n    stateContent: Buffer.from(result.stateText, 'utf8').toString('base64'),\n    stateSha: stateItem ? stateItem.json.sha : undefined,\n    storeContent: Buffer.from(result.storeText, 'utf8').toString('base64'),\n    storeSha: storeItem ? storeItem.json.sha : undefined,\n    fetched: result.fetched,\n    watermark: result.watermark,\n  },\n}];"
+      }
+    },
+    {
+      "name": "Write state.json",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        -80
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "https://api.github.com/repos/skomp/n8n-data/contents/state.json",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"message\": \"sync: update watermark\", \"content\": $json.stateContent, \"sha\": $json.stateSha } }}"
+      },
+      "credentials": {
+        "githubApi": {
+          "name": "GitHub PAT (triage analytics)"
+        }
+      }
+    },
+    {
+      "name": "Write issues.ndjson",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        80
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "https://api.github.com/repos/skomp/n8n-data/contents/issues.ndjson",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"message\": \"sync: \" + $json.fetched + \" issue(s) fetched\", \"content\": $json.storeContent, \"sha\": $json.storeSha } }}"
+      },
+      "credentials": {
+        "githubApi": {
+          "name": "GitHub PAT (triage analytics)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily": {
+      "main": [
+        [
+          {
+            "node": "Read state.json",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read issues.ndjson",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read state.json": {
+      "main": [
+        [
+          {
+            "node": "Sync",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read issues.ndjson": {
+      "main": [
+        [
+          {
+            "node": "Sync",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync": {
+      "main": [
+        [
+          {
+            "node": "Write state.json",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Write issues.ndjson",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
