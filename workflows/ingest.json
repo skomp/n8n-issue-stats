@@ -4,7 +4,7 @@
     {
       "name": "Daily",
       "type": "n8n-nodes-base.scheduleTrigger",
-      "typeVersion": 1.2,
+      "typeVersion": 1.4,
       "position": [
         0,
         0
@@ -23,10 +23,10 @@
     {
       "name": "Read state.json",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "typeVersion": 4.5,
       "position": [
-        240,
-        -80
+        220,
+        0
       ],
       "parameters": {
         "method": "GET",
@@ -45,17 +45,20 @@
       },
       "credentials": {
         "githubApi": {
-          "name": "GitHub PAT (triage analytics)"
+          "id": "45FxaagCNEF224PE",
+          "name": "GitHub account"
         }
-      }
+      },
+      "notes": "state.json is 136 bytes, so the JSON envelope returns its content and blob sha intact.",
+      "notesInFlow": false
     },
     {
-      "name": "Read issues.ndjson",
+      "name": "Read issues.ndjson sha",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "typeVersion": 4.5,
       "position": [
-        240,
-        80
+        440,
+        0
       ],
       "parameters": {
         "method": "GET",
@@ -74,34 +77,24 @@
       },
       "credentials": {
         "githubApi": {
-          "name": "GitHub PAT (triage analytics)"
+          "id": "45FxaagCNEF224PE",
+          "name": "GitHub account"
         }
-      }
+      },
+      "notes": "Metadata only. The blob sha is required by the PUT and changes on every write, so it is re-fetched every run and never cached. The content field of this response is EMPTY (the file is over 1 MB) and must not be used — \"Read issues.ndjson\" fetches the bytes.",
+      "notesInFlow": false
     },
     {
-      "name": "Sync",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
+      "name": "Read issues.ndjson",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
       "position": [
-        480,
+        660,
         0
       ],
       "parameters": {
-        "mode": "runOnceForAllItems",
-        "jsCode": "const TRIAGE_LABELS = [\n  'triage:pending', 'triage:in-progress', 'triage:needs-info',\n  'triage:needs-reproduction', 'triage:ready-for-review', 'triage:complete',\n  'triage:stalled', 'triage:ping', 'triage:tests-needed',\n];\n\nconst TEAM_LABELS = [\n  'team:nodes', 'team:ai', 'team:api', 'team:iam', 'team:chat', 'team:design',\n  'team:qa-dx', 'team:lifecycle', 'team:relay', 'team:identity', 'team:cats',\n  'team:payday', 'team:adore', 'team:ins', 'team:instance-ai',\n];\n\nconst CLOSED_LABELS = [\n  'closed:duplicate', 'closed:cant-reproduce', 'closed:working-as-expected',\n  'closed:support-issue', 'closed:incomplete-template',\n  'closed:enhancement/feature', 'closed:info', 'closed:non-english',\n  'closed:requested',\n];\n\nconst ALL_FILTER_LABELS = [...TRIAGE_LABELS, ...TEAM_LABELS, ...CLOSED_LABELS];\n\n// Spec section 8 headline: the rejection reasons which say the issue should\n// never have been filed as a bug at all. A subset of CLOSED_LABELS. An issue\n// carrying two of them is counted once.\nconst SHOULD_NOT_HAVE_BEEN_FILED = [\n  'closed:incomplete-template', 'closed:support-issue', 'closed:non-english',\n];\n\n// Retained deliberately: these matched ZERO issues in the measured population\n// because they never co-occur with the 33 filter labels. They cost nothing and\n// n8n's labelling may change. Do not delete them assuming they are broken.\nconst ADHOC_COMPONENT_LABELS = [\n  'core', 'ui', 'dx', 'deployment', 'performance', 'security',\n];\n\n\n\nconst ISSUES_QUERY = `\nquery($cursor: String, $labels: [String!]!, $since: DateTime) {\n  rateLimit { cost remaining }\n  repository(owner: \"n8n-io\", name: \"n8n\") {\n    issues(first: 100, after: $cursor, labels: $labels,\n           filterBy: {since: $since},\n           orderBy: {field: UPDATED_AT, direction: ASC}) {\n      pageInfo { hasNextPage endCursor }\n      nodes {\n        number title state createdAt updatedAt closedAt\n        author { login }\n        labels(first: 30) { nodes { name } }\n        reactions { totalCount }\n        comments { totalCount }\n        closedByPullRequestsReferences(first: 5, includeClosedPrs: true) {\n          nodes { number createdAt mergedAt\n                  files(first: 100) { nodes { path } } }\n        }\n      }\n    }\n  }\n}`;\n\nasync function fetchPage({ token, cursor = null, since = null }) {\n  const res = await fetch('https://api.github.com/graphql', {\n    method: 'POST',\n    headers: {\n      Authorization: `Bearer ${token}`,\n      'Content-Type': 'application/json',\n      'User-Agent': 'skomp-n8n-triage-analytics',\n    },\n    body: JSON.stringify({\n      query: ISSUES_QUERY,\n      variables: { cursor, since, labels: ALL_FILTER_LABELS },\n    }),\n  });\n\n  if (!res.ok) throw new Error(`GitHub HTTP ${res.status}: ${await res.text()}`);\n\n  const body = await res.json();\n  if (body.errors) throw new Error(`GitHub GraphQL: ${body.errors.map(e => e.message).join('; ')}`);\n\n  const conn = body.data.repository.issues;\n  return {\n    nodes: conn.nodes,\n    endCursor: conn.pageInfo.endCursor,\n    hasNextPage: conn.pageInfo.hasNextPage,\n    cost: body.data.rateLimit.cost,\n    remaining: body.data.rateLimit.remaining,\n  };\n}\n\nasync function fetchAll({ token, since = null, onPage = null }) {\n  const issues = [];\n  let cursor = null, pages = 0, points = 0;\n\n  for (;;) {\n    const page = await fetchPage({ token, cursor, since });\n    issues.push(...page.nodes);\n    pages += 1;\n    points += page.cost;\n    if (onPage) onPage({ pages, points, received: issues.length, remaining: page.remaining });\n    if (!page.hasNextPage) break;\n    // A repeated endCursor means the API cannot advance. A silent `break` here\n    // would return a short result indistinguishable from a complete one, and\n    // the caller would write a truncated store while reporting success. Throw\n    // instead, so the stall is diagnosable and cannot be mistaken for done.\n    if (page.endCursor === cursor) {\n      throw new Error(\n        `fetchAll: stalled cursor \"${cursor}\" did not advance after ${pages} page(s) ` +\n        `and ${issues.length} issue(s) collected`\n      );\n    }\n    cursor = page.endCursor;\n  }\n\n  return { issues, pages, points };\n}\n\n\nfunction parseStore(text) {\n  const map = new Map();\n  for (const line of text.split('\\n')) {\n    const trimmed = line.trim();\n    if (!trimmed) continue;\n    const issue = JSON.parse(trimmed);\n    map.set(issue.number, issue);\n  }\n  return map;\n}\n\nfunction serialiseStore(map) {\n  return [...map.values()]\n    .sort((a, b) => a.number - b.number)\n    .map(i => JSON.stringify(i))\n    .join('\\n') + '\\n';\n}\n\nfunction upsert(map, issues) {\n  for (const issue of issues) map.set(issue.number, issue);\n  return map;\n}\n\nfunction watermarkOf(map) {\n  let max = null;\n  for (const issue of map.values()) {\n    if (issue.updatedAt && (max === null || issue.updatedAt > max)) max = issue.updatedAt;\n  }\n  return max;\n}\n\n\n\nconst OVERLAP_MS = 5 * 60 * 1000;\n\n// Deliberately re-fetch a 5-minute overlap. Duplicates are cheap because\n// upsert is keyed on issue number; a gap is silent and permanent.\nfunction overlapWindow(watermark) {\n  if (!watermark) return null;\n  return new Date(Date.parse(watermark) - OVERLAP_MS).toISOString().replace(/\\.\\d{3}Z$/, 'Z');\n}\n\nasync function syncSince(store, { token }) {\n  const since = overlapWindow(watermarkOf(store));\n  const { issues } = await fetchAll({ token, since });\n  upsert(store, issues);\n  return { store, fetched: issues.length, watermark: watermarkOf(store) };\n}\n\n\nfunction isStalledCursorError(err) {\n  return typeof err?.message === 'string' && err.message.startsWith('fetchAll: stalled cursor');\n}\n\nfunction isSecondaryRateLimitError(err) {\n  const msg = String(err?.message ?? '');\n  return /^GitHub HTTP 403:/.test(msg) && /secondary rate limit|abuse detection/i.test(msg);\n}\n\nasync function fetchAllWithRetry(fetchAllFn, opts, {\n  maxAttempts = 3,\n  waitMs = 5 * 60 * 1000,\n  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),\n} = {}) {\n  let lastErr;\n  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {\n    try {\n      return await fetchAllFn(opts);\n    } catch (err) {\n      // Hard failure: never retry. A stalled cursor will not un-stall itself.\n      if (isStalledCursorError(err)) throw err;\n      // Anything that is not the transient secondary rate limit is also a\n      // hard failure for this wrapper — only that one condition is retryable.\n      if (!isSecondaryRateLimitError(err) || attempt === maxAttempts) throw err;\n      lastErr = err;\n      await sleep(waitMs);\n    }\n  }\n  throw lastErr;\n}\n\nasync function runIngest({ stateText, storeText, token, fetchAllFn = fetchAll }) {\n  const store = parseStore(storeText ?? '');\n  const state = stateText ? JSON.parse(stateText) : {};\n  const since = overlapWindow(state.watermark ?? watermarkOf(store));\n  const { issues, pages, points } = await fetchAllWithRetry(fetchAllFn, { token, since });\n  upsert(store, issues);\n  const watermark = watermarkOf(store);\n  return {\n    storeText: serialiseStore(store),\n    stateText: JSON.stringify({ watermark }, null, 2) + '\\n',\n    fetched: issues.length,\n    pages,\n    points,\n    watermark,\n  };\n}\n\n// --- n8n driver ---------------------------------------------------------\n// This node receives one item per upstream HTTP Request (the GitHub Contents\n// API responses for state.json and issues.ndjson, connected into the same\n// input). It reads both, runs the sync, and returns a SINGLE item: the two\n// downstream \"Write\" HTTP Request nodes both read their own field off this\n// one item, so the item count does not multiply with store size.\nconst inputs = $input.all();\nconst stateItem = inputs.find(i => typeof i.json.path === 'string' && i.json.path.endsWith('state.json'));\nconst storeItem = inputs.find(i => typeof i.json.path === 'string' && i.json.path.endsWith('issues.ndjson'));\n\nconst stateText = stateItem ? Buffer.from(stateItem.json.content, 'base64').toString('utf8') : null;\nconst storeText = storeItem ? Buffer.from(storeItem.json.content, 'base64').toString('utf8') : '';\n// ASSUMPTION (unverifiable on the free trial): the instance permits Code-node\n// access to environment variables. Verify against N8N_BLOCK_ENV_ACCESS_IN_NODE.\nconst token = $env.GITHUB_TOKEN;\n\nconst result = await runIngest({ stateText, storeText, token });\n\nreturn [{\n  json: {\n    stateContent: Buffer.from(result.stateText, 'utf8').toString('base64'),\n    stateSha: stateItem ? stateItem.json.sha : undefined,\n    storeContent: Buffer.from(result.storeText, 'utf8').toString('base64'),\n    storeSha: storeItem ? storeItem.json.sha : undefined,\n    fetched: result.fetched,\n    watermark: result.watermark,\n  },\n}];"
-      }
-    },
-    {
-      "name": "Write state.json",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        720,
-        -80
-      ],
-      "parameters": {
-        "method": "PUT",
-        "url": "https://api.github.com/repos/skomp/n8n-data/contents/state.json",
+        "method": "GET",
+        "url": "https://api.github.com/repos/skomp/n8n-data/contents/issues.ndjson",
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "githubApi",
         "sendHeaders": true,
@@ -109,27 +102,124 @@
           "parameters": [
             {
               "name": "Accept",
-              "value": "application/vnd.github+json"
+              "value": "application/vnd.github.raw"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "githubApi": {
+          "id": "45FxaagCNEF224PE",
+          "name": "GitHub account"
+        }
+      },
+      "notes": "Accept: application/vnd.github.raw is mandatory. With the default JSON media type the Contents API returns HTTP 200 with an EMPTY content field for files over 1 MB, and issues.ndjson is 2.86 MB. Measured 2026-09-06.",
+      "notesInFlow": false
+    },
+    {
+      "name": "Plan fetch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const TRIAGE_LABELS = [\n  'triage:pending', 'triage:in-progress', 'triage:needs-info',\n  'triage:needs-reproduction', 'triage:ready-for-review', 'triage:complete',\n  'triage:stalled', 'triage:ping', 'triage:tests-needed',\n];\n\nconst TEAM_LABELS = [\n  'team:nodes', 'team:ai', 'team:api', 'team:iam', 'team:chat', 'team:design',\n  'team:qa-dx', 'team:lifecycle', 'team:relay', 'team:identity', 'team:cats',\n  'team:payday', 'team:adore', 'team:ins', 'team:instance-ai',\n];\n\nconst CLOSED_LABELS = [\n  'closed:duplicate', 'closed:cant-reproduce', 'closed:working-as-expected',\n  'closed:support-issue', 'closed:incomplete-template',\n  'closed:enhancement/feature', 'closed:info', 'closed:non-english',\n  'closed:requested',\n];\n\nconst ALL_FILTER_LABELS = [...TRIAGE_LABELS, ...TEAM_LABELS, ...CLOSED_LABELS];\n\n// Spec section 8 headline: the rejection reasons which say the issue should\n// never have been filed as a bug at all. A subset of CLOSED_LABELS. An issue\n// carrying two of them is counted once.\nconst SHOULD_NOT_HAVE_BEEN_FILED = [\n  'closed:incomplete-template', 'closed:support-issue', 'closed:non-english',\n];\n\n// Retained deliberately: these matched ZERO issues in the measured population\n// because they never co-occur with the 33 filter labels. They cost nothing and\n// n8n's labelling may change. Do not delete them assuming they are broken.\nconst ADHOC_COMPONENT_LABELS = [\n  'core', 'ui', 'dx', 'deployment', 'performance', 'security',\n];\n\n\n\nconst ISSUES_QUERY = `\nquery($cursor: String, $labels: [String!]!, $since: DateTime) {\n  rateLimit { cost remaining }\n  repository(owner: \"n8n-io\", name: \"n8n\") {\n    issues(first: 100, after: $cursor, labels: $labels,\n           filterBy: {since: $since},\n           orderBy: {field: UPDATED_AT, direction: ASC}) {\n      pageInfo { hasNextPage endCursor }\n      nodes {\n        number title state createdAt updatedAt closedAt\n        author { login }\n        labels(first: 30) { nodes { name } }\n        reactions { totalCount }\n        comments { totalCount }\n        closedByPullRequestsReferences(first: 5, includeClosedPrs: true) {\n          nodes { number createdAt mergedAt\n                  files(first: 100) { nodes { path } } }\n        }\n      }\n    }\n  }\n}`;\n\n\n\n\n\nconst OVERLAP_MS = 5 * 60 * 1000;\n\n// Deliberately re-fetch a 5-minute overlap. Duplicates are cheap because\n// upsert is keyed on issue number; a gap is silent and permanent.\nfunction overlapWindow(watermark) {\n  if (!watermark) return null;\n  return new Date(Date.parse(watermark) - OVERLAP_MS).toISOString().replace(/\\.\\d{3}Z$/, 'Z');\n}\n\n\n\nfunction planFetch(stateText) {\n  const state = stateText ? JSON.parse(stateText) : {};\n  const since = overlapWindow(state.watermark ?? null);\n  return {\n    since,\n    labels: ALL_FILTER_LABELS,\n    body: { query: ISSUES_QUERY, variables: { cursor: null, since, labels: ALL_FILTER_LABELS } },\n  };\n}\n\n// --- n8n driver ---------------------------------------------------------\n// ONE item in, ONE item out. This node builds the GraphQL request body for\n// the \"Fetch issues\" HTTP Request node, which does the actual paging: the\n// Code node sandbox has NO network access, so nothing here may make an HTTP\n// request of any kind.\n//\n// The query text and the 33-label filter are the inlined source of\n// src/lib/github.js and src/lib/labels.js, so the workflow and the local\n// backfill (src/backfill.js) always send the identical request. They write to\n// the same NDJSON store; a schema mismatch between them would corrupt it.\nconst stateItem = $('Read state.json').first();\nconst stateText = Buffer.from(stateItem.json.content ?? '', 'base64').toString('utf8');\n\nconst plan = planFetch(stateText);\n\nreturn [{ json: { since: plan.since, labels: plan.labels, body: plan.body } }];"
+      }
+    },
+    {
+      "name": "Fetch issues",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1100,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.github.com/graphql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "User-Agent",
+              "value": "skomp-n8n-triage-analytics"
             }
           ]
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { \"message\": \"sync: update watermark\", \"content\": $json.stateContent, \"sha\": $json.stateSha } }}"
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "body",
+                    "name": "variables",
+                    "value": "={{ { \"cursor\": $response?.body?.data?.repository?.issues?.pageInfo?.endCursor ?? null, \"since\": $json.since, \"labels\": $json.labels } }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response?.body?.data?.repository?.issues?.pageInfo?.hasNextPage }}",
+              "requestInterval": 300,
+              "limitPagesFetched": true,
+              "maxRequests": 200
+            }
+          }
+        }
       },
       "credentials": {
         "githubApi": {
-          "name": "GitHub PAT (triage analytics)"
+          "id": "45FxaagCNEF224PE",
+          "name": "GitHub account"
         }
+      },
+      "notes": "The Code node sandbox has no network access, so all GitHub HTTP happens here. Paging is the node's built-in cursor pagination over the GraphQL endCursor.",
+      "notesInFlow": false,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "name": "Upsert store",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function parseStore(text) {\n  const map = new Map();\n  for (const line of text.split('\\n')) {\n    const trimmed = line.trim();\n    if (!trimmed) continue;\n    const issue = JSON.parse(trimmed);\n    map.set(issue.number, issue);\n  }\n  return map;\n}\n\nfunction serialiseStore(map) {\n  return [...map.values()]\n    .sort((a, b) => a.number - b.number)\n    .map(i => JSON.stringify(i))\n    .join('\\n') + '\\n';\n}\n\nfunction upsert(map, issues) {\n  for (const issue of issues) map.set(issue.number, issue);\n  return map;\n}\n\nfunction watermarkOf(map) {\n  let max = null;\n  for (const issue of map.values()) {\n    if (issue.updatedAt && (max === null || issue.updatedAt > max)) max = issue.updatedAt;\n  }\n  return max;\n}\n\n\nconst MIN_STORE_FRACTION = 0.9;\n\nfunction assertStoreIsIntact(store, state = {}) {\n  if (store.size === 0) {\n    throw new Error(\n      'refusing to write: the store read back EMPTY. GitHub\\'s Contents API returns HTTP 200 ' +\n      'with an empty content field for files over 1 MB — read issues.ndjson with ' +\n      'Accept: application/vnd.github.raw. Writing now would destroy the store.'\n    );\n  }\n  const expected = typeof state.records === 'number' ? state.records : null;\n  if (expected !== null && store.size < expected * MIN_STORE_FRACTION) {\n    throw new Error(\n      `refusing to write: the store read back ${store.size} record(s) but state.json records ` +\n      `${expected}. That is below ${MIN_STORE_FRACTION * 100}% of the expected count, so the read ` +\n      'was short. Writing now would shrink the store.'\n    );\n  }\n}\n\nfunction issuesFromPages(pages) {\n  const issues = [];\n  for (const [index, page] of pages.entries()) {\n    if (page?.errors) {\n      throw new Error(`GitHub GraphQL (page ${index + 1}): ${page.errors.map(e => e.message).join('; ')}`);\n    }\n    const nodes = page?.data?.repository?.issues?.nodes;\n    if (!Array.isArray(nodes)) {\n      throw new Error(\n        `GitHub GraphQL (page ${index + 1}): response carried no data.repository.issues.nodes — ` +\n        'refusing to build a store from an unrecognised response'\n      );\n    }\n    issues.push(...nodes);\n  }\n  return issues;\n}\n\nfunction applyPages({ storeText, stateText, pages }) {\n  const store = parseStore(storeText ?? '');\n  const state = stateText ? JSON.parse(stateText) : {};\n  // Before anything else, and before any HTTP write can be reached.\n  assertStoreIsIntact(store, state);\n\n  const issues = issuesFromPages(pages);\n  upsert(store, issues);\n  const watermark = watermarkOf(store);\n  // Merge, do not replace: state.json also carries `source` and\n  // `backfilledAt`, written by the backfill and not reproducible from here.\n  const nextState = { ...state, watermark, records: store.size };\n\n  return {\n    storeText: serialiseStore(store),\n    stateText: JSON.stringify(nextState, null, 2) + '\\n',\n    fetched: issues.length,\n    records: store.size,\n    watermark,\n  };\n}\n\n// --- n8n driver ---------------------------------------------------------\n// CRITICAL MEMORY CONSTRAINT (spec section 5): this node holds the store as a\n// single TEXT string and returns ONE item. Do NOT change it to emit one item\n// per issue. n8n holds every node's output array in memory for the whole\n// execution; the store holds 5,464+ issues, and one item per issue is the\n// exact out-of-memory failure this project exists to avoid.\n//\n// Input is one item per GraphQL page from \"Fetch issues\". The store and the\n// state are read from their own nodes by name so the page count never\n// multiplies them.\nconst pages = $input.all().map(item => item.json);\nconst storeText = $('Read issues.ndjson').first().json.data;\nconst stateText = Buffer.from($('Read state.json').first().json.content ?? '', 'base64').toString('utf8');\n\n// applyPages() throws BEFORE producing any write payload if the store read\n// back empty or short — see assertStoreIsIntact above. Do not catch it: a\n// failed run is recoverable, an overwritten store is not.\nconst result = applyPages({ storeText, stateText, pages });\n\nreturn [{\n  json: {\n    storeContent: Buffer.from(result.storeText, 'utf8').toString('base64'),\n    // The blob sha changes on every write, so it is re-read each run and\n    // never cached.\n    storeSha: $('Read issues.ndjson sha').first().json.sha,\n    stateContent: Buffer.from(result.stateText, 'utf8').toString('base64'),\n    stateSha: $('Read state.json').first().json.sha,\n    fetched: result.fetched,\n    records: result.records,\n    watermark: result.watermark,\n  },\n}];"
       }
     },
     {
       "name": "Write issues.ndjson",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "typeVersion": 4.5,
       "position": [
-        720,
-        80
+        1540,
+        0
       ],
       "parameters": {
         "method": "PUT",
@@ -147,13 +237,49 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { \"message\": \"sync: \" + $json.fetched + \" issue(s) fetched\", \"content\": $json.storeContent, \"sha\": $json.storeSha } }}"
+        "jsonBody": "={{ JSON.stringify({ \"message\": \"sync: \" + $json.fetched + \" issue(s) fetched, \" + $json.records + \" stored\", \"content\": $json.storeContent, \"sha\": $json.storeSha }) }}"
       },
       "credentials": {
         "githubApi": {
-          "name": "GitHub PAT (triage analytics)"
+          "id": "45FxaagCNEF224PE",
+          "name": "GitHub account"
         }
       }
+    },
+    {
+      "name": "Write state.json",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1760,
+        0
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "https://api.github.com/repos/skomp/n8n-data/contents/state.json",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ \"message\": \"sync: watermark \" + $('Upsert store').first().json.watermark, \"content\": $('Upsert store').first().json.stateContent, \"sha\": $('Upsert store').first().json.stateSha }) }}"
+      },
+      "credentials": {
+        "githubApi": {
+          "id": "45FxaagCNEF224PE",
+          "name": "GitHub account"
+        }
+      },
+      "notes": "Runs AFTER the store write, deliberately. If the store write fails the watermark is not advanced and the next run re-fetches the same window; the reverse order would leave a permanent gap.",
+      "notesInFlow": false
     }
   ],
   "connections": {
@@ -164,11 +290,6 @@
             "node": "Read state.json",
             "type": "main",
             "index": 0
-          },
-          {
-            "node": "Read issues.ndjson",
-            "type": "main",
-            "index": 0
           }
         ]
       ]
@@ -177,7 +298,18 @@
       "main": [
         [
           {
-            "node": "Sync",
+            "node": "Read issues.ndjson sha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read issues.ndjson sha": {
+      "main": [
+        [
+          {
+            "node": "Read issues.ndjson",
             "type": "main",
             "index": 0
           }
@@ -188,23 +320,51 @@
       "main": [
         [
           {
-            "node": "Sync",
+            "node": "Plan fetch",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Sync": {
+    "Plan fetch": {
+      "main": [
+        [
+          {
+            "node": "Fetch issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch issues": {
+      "main": [
+        [
+          {
+            "node": "Upsert store",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert store": {
+      "main": [
+        [
+          {
+            "node": "Write issues.ndjson",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write issues.ndjson": {
       "main": [
         [
           {
             "node": "Write state.json",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Write issues.ndjson",
             "type": "main",
             "index": 0
           }
