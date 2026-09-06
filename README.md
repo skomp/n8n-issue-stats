@@ -314,7 +314,7 @@ Fixtures are 10 real records pulled from the live API plus 3 synthetic ones
 (numbers `9000xx`) covering branches real data does not exercise. Assertions are
 on decoded values — which component, how many days — never on shape.
 
-## Four bugs that only fail in production
+## Five bugs that only fail in production
 
 None of these is a coding error. Each is an assumption that holds in testing and
 breaks in production, and each was caught by checking against something real.
@@ -325,6 +325,7 @@ They are documented because the class matters more than the instances.
 | **GitHub's Contents API silently truncates >1 MB.** Returns HTTP 200, `encoding: "none"`, empty `content`. | Read store → empty → upsert 20 → write back. **Store drops 5,464 → 20 records and the run reports success.** Requires `Accept: application/vnd.github.raw` plus a non-empty guard before any write. |
 | **n8n's Code node has no network access.** `fetch`, `axios` and http modules fail at runtime. | The ingest workflow deploys clean, validates clean, dies at 3am on its first scheduled run. Fetching must happen in an HTTP Request node. |
 | **`closedByPullRequestsReferences` returns unmerged PRs.** 666 of 1,218 (55%) were closed without merging. | Fix lead time computed against `null`, and component attributed to an abandoned PR. |
+| **Two modules each declared `const DAY_MS`.** Fine separately; concatenated into one Code node it is `SyntaxError: Identifier 'DAY_MS' has already been declared`. | Thrown at **run time, not import time**. Every unit test passes, the workflow validates, the JSON is well-formed — and it dies every Monday. Only the packaging can produce this bug, so only the packaging can catch it; there is now a build-time guard against the whole class. |
 | **Scoped npm packages need three path segments.** | `packages/@n8n/db` truncated to `packages/@n8n` collapses ~40 packages into one fictitious bucket that would rank second-largest in the report. |
 
 The through-line: a check cheap enough that it cannot fail proves nothing.
@@ -354,6 +355,24 @@ The orchestrator addresses its two sub-workflows **by id**
 deployment facts: a wrong id points the orchestrator at a different workflow and
 the run still succeeds. `SUB_WORKFLOWS` in `build/build-workflows.js` is the one
 place they are written down.
+
+## What has actually been run
+
+Everything below was executed against the live instance and the real
+repositories, not asserted from a green test run.
+
+| Workflow | id | Runs | What it proved |
+|---|---|---|---|
+| Ingest | `AE9bsoYqgcFuz1T3` | 3 | Cursor pagination over **5 pages — 439 issues, 0 duplicates**. Issue numbers advance strictly across pages, so the cursor is genuinely carried. The Merge barrier emits exactly one empty item and the 2.9 MB store is not copied through it. |
+| Report | `yuzPI1WHGOcpzljg` | 3 | Three idempotent writes. Two same-day re-runs left `index.html` byte-identical to the dated archive — the defect in [#2](https://github.com/skomp/n8n-test/issues/2). |
+| Orchestrator | `n3cSgsUgaLDg23Wg` | 1 | Sequential execution, proven by commit timestamps: the ingest's last write landed at `12:52:47`, the report's first at `12:52:50`. `waitForSubWorkflow` is honoured in practice, not merely set in config. |
+
+Store integrity held throughout: 5,464 records before and after a 439-record
+upsert, byte size unchanged, watermark advancing correctly. The truncation
+guard ran and passed rather than being bypassed.
+
+**All three are deployed but unpublished** — nothing runs on a schedule yet.
+Publishing a workflow is what activates its trigger.
 
 ## Limits worth stating plainly
 

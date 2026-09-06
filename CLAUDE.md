@@ -22,7 +22,7 @@ changes.
 |---|---|---|
 | Triage analytics — report | `workflows/report.json` | `yuzPI1WHGOcpzljg` |
 | Triage analytics — ingest | `workflows/ingest.json` | `AE9bsoYqgcFuz1T3` |
-| Triage analytics — sync and report | `workflows/orchestrator.json` | not deployed yet |
+| Triage analytics — sync and report | `workflows/orchestrator.json` | `n3cSgsUgaLDg23Wg` |
 
 The third workflow (slug `n8n-triage-orchestrator`) runs the other two in
 sequence. Both of those carry a second trigger, an `executeWorkflowTrigger`, so
