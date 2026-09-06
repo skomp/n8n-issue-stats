@@ -20,6 +20,29 @@ in the report prints its denominator.
   the generated workflow JSON (`workflows/`), and the deploy script
   (`scripts/deploy.sh`).
 
+## The report window: two denominators, deliberately
+
+The store keeps full history, but the report does not use one population for
+everything. `rollup(issues, { windowDays = 180, now = new Date() })` computes:
+
+- **Windowed** (`createdAt >= now - windowDays`): intake and outcome, rejection
+  reasons, component, component coverage, triage funnel, monthly intake, and
+  the headline. Intake is a question about the recent past.
+- **Not windowed** — all history, always: all three lead-time measures.
+
+Windowing a lead time by the date the issue was *created* truncates the
+distribution at both ends, and it removes the slow half. Measured on the real
+5,464-record store, the median fix lead time is **25.3 days** over all history
+but **12.7 days** windowed — a 2x understatement that is pure truncation bias,
+not an improvement. The tail is the whole story of a lead-time distribution.
+
+`rollup()` therefore returns `total` as the **full** population and
+`window: { since, days, population }` as the windowed one, so every table in
+the report can print the denominator it was actually computed over. Each
+windowed section states its window; the lead-time section states that it is not
+windowed. See the comment at the top of `src/lib/rollup.js` before changing any
+of this.
+
 ## Getting a token
 
 The backfill and sync scripts need a GitHub token with `Issues: read` and
