@@ -58,6 +58,30 @@ Two rules the script depends on, both from that schema:
   returns are substituted into the orchestrator's Execute Workflow nodes. On a
   new instance the compiled-in ids do not exist. Never restore a glob loop.
 
+## Known drift: two comment lines in the deployed report workflow
+
+`workflows/report.json` and the deployed workflow `yuzPI1WHGOcpzljg` differ by
+**two comment lines and nothing else**. Both cite this repository's old name:
+
+- `Plan writes`, inside its `jsCode` — `skomp/n8n-test#2`
+- `Write report`, in its top-level `notes` — `skomp/n8n-test#2`
+
+The repo was renamed to `n8n-issue-stats`; the generated files were updated, the
+instance was not. GitHub redirects renamed repositories permanently, so both
+citations still resolve. The functional graph is identical — a diff shows only
+these two strings.
+
+It was left because `update_workflow` has no operation for a node's `notes`
+field, so correcting it means removing and re-adding a live node, and the only
+way to do that without the ops generator is to hand-transcribe ~3 KB of
+`jsCode` — the exact transcription risk that tooling exists to remove.
+
+**This resolves itself on the next substantive redeploy of the report
+workflow**, which will carry the corrected comments along for free. If you run
+`to-ops.mjs` against the deployed workflow before then, expect 5 operations
+(`removeNode`, `addNode`, `updateNodeParameters`, `addConnection` ×2) and
+recognise them as this, not as a real difference.
+
 ## Tests
 
 `npm test` runs `node --test tests/*.test.js`. **Never `node --test tests/`** —
